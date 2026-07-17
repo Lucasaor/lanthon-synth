@@ -1,0 +1,75 @@
+# =============================================================================
+# lanthon-synth.service — Systemd unit for headless auto-start
+# =============================================================================
+# Installed to /etc/systemd/system/lanthon-synth.service by deploy/setup.sh
+#
+# This service:
+#   1. Waits for the sound card to be available
+#   2. Starts JACK (low-latency audio server)
+#   3. Starts sclang with the main.scd patch
+#   4. Restarts on failure
+#
+# Placeholders resolved by setup.sh:
+#   %PROJECT_DIR% → absolute path to the lanthon-synth project
+#   %USER%        → the user to run as
+
+[Unit]
+Description=Lanthon Synth — SuperCollider Live Performance Rig
+Documentation=https://github.com/lucasaor/lanthon-synth
+After=network.target sound.target syslog.target
+Wants=sound.target
+
+# Ensure the CPU governor service ran first
+After=cpufrequtils.service
+
+[Service]
+Type=simple
+User=%USER%
+Group=audio
+WorkingDirectory=%PROJECT_DIR%
+
+# Environment
+Environment="SC_JACK_DEFAULT_INPUT_PORT=system:capture_1"
+Environment="SC_JACK_DEFAULT_OUTPUT_PORT=system:playback_1"
+Environment="JACK_DEVICE=hw:USB"
+
+# Pre-start: verify sound card and JACK
+# If jackd fails, sclang can fall back to portaudio (but latency will suffer)
+ExecStartPre=/bin/sleep 3
+ExecStartPre=/usr/local/bin/lanthon-jack-start.sh &
+ExecStartPre=/bin/sleep 2
+
+# Main command: run sclang with the main patch
+# -D: don't load any startup file
+# -l: specify the library config path (optional)
+ExecStart=/usr/bin/sclang -D %PROJECT_DIR%/src/main.scd
+
+# Restart policy — restart on crash, but limit rapid restarts
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+# Logging
+StandardOutput=append:/var/log/lanthon-synth/stdout.log
+StandardError=append:/var/log/lanthon-synth/stderr.log
+SyslogIdentifier=lanthon-synth
+
+# Security hardening (lightweight — we need real-time audio)
+NoNewPrivileges=no
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/log/lanthon-synth
+ReadWritePaths=/tmp
+ReadWritePaths=/dev/shm
+ReadOnlyPaths=%PROJECT_DIR%
+
+# Allow real-time scheduling and memory locking for JACK/SC
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+LimitNICE=-19
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=80
+
+[Install]
+WantedBy=multi-user.target
