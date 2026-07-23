@@ -1,86 +1,68 @@
 // =============================================================================
 // Step 8 — Shared Clock + Click / Metronome
 // =============================================================================
-// A single TempoClock drives BOTH:
-//   1. The click/metronome Synth (routed to ~clickOutBus, never main mix)
-//   2. All loop quantization (so loop boundaries never drift from the click)
+// A single TempoClock drives ALL timing:
+//   1. The click/metronome \click Synth (routed to ~iemOutBus, NEVER FOH)
+//   2. Any synth quantization that needs beat alignment
 //
-// Using ONE shared clock is non-negotiable per the prompt.  If separate
-// clocks were used, they would inevitably drift apart over minutes of
-// performance, causing audible flamming between the click and loop edges.
-//
-// The click is a short beep on beat 1 (higher pitch) and a quieter tick on
-// beats 2, 3, 4.  This gives the drummer a clear downbeat reference.
-//
-// The click is routed exclusively to ~clickOutBus (bus 2-3 by default),
-// which should be connected to the drummer's monitor mix, NEVER to the
-// main/FOH output.  See synths.scd for bus assignments.
+// Tempo is set from the active song's metadata (tempo field in the setlist JSON).
+// It is NEVER inferred from audio content — the setlist is the authority.
+// The OLED daemon is notified on every tempo change via ~oledUpdate (defined
+// in backtrack.scd — called here if it exists).
 
 // =============================================================================
 // CONFIGURATION
 // =============================================================================
 
-~clockBpm     = 120;        // default tempo — can be changed live
-~clockBeats   = 4;          // time signature: 4/4
-~clickDownbeatFreq = 1800;  // Hz — high beep for beat 1
-~clickSubFreq      = 1000;  // Hz — lower tick for beats 2,3,4
-~clickDuration     = 0.04;  // seconds — short and tight
-~clickAmp          = 0.6;   // volume (monitor bus only)
+~clockBpm             = 120;        // default tempo before a setlist is loaded
+~clockBeats           = 4;          // time signature numerator (4/4)
+~clickDownbeatFreq    = 1800;       // Hz — high beep for beat 1
+~clickSubFreq         = 1000;       // Hz — lower tick for beats 2,3,4
+~clickDuration        = 0.04;       // seconds — short and tight
+~clickAmp             = 0.6;        // click volume (monitor bus only)
 
 // =============================================================================
 // CLOCK SETUP
 // =============================================================================
 
-~mainClock = nil;         // the shared TempoClock instance
-~clickRoutine = nil;      // the Routine that fires click Synths
-~clickRunning = false;    // flag
+~mainClock    = nil;
+~clickRoutine = nil;
+~clickRunning = false;
 
-// ----- Start the shared clock and click -----
 ~startClock = { |bpm|
 	bpm = bpm ? ~clockBpm;
 	if (~mainClock.notNil, {
-		"Clock already running — stopping old clock first.".postln;
+		"Clock already running — stopping old instance first.".postln;
 		~stopClock.();
 	});
 
-	~mainClock = TempoClock.new(bpm / 60, 0);  // bps = bpm/60
-	~clockBpm = bpm;
+	~mainClock = TempoClock.new(bpm / 60, 0);
+	~clockBpm  = bpm;
+	"Shared clock started at % BPM".format(bpm).postln;
 
-	"Shared clock started at % BPM (%).".format(bpm, ~mainClock).postln;
-
-	// Start the click routine.
-	// We use a Routine scheduled on the clock so that each beat fires
-	// precisely on the clock's grid — this guarantees the click and loop
-	// quantization use the exact same timebase.
 	~clickRoutine = Routine {
 		var beat = 0;
 		loop {
-			var freq;
-			// Beat 0 (downbeat) = higher pitch
-			freq = if (beat == 0, { ~clickDownbeatFreq }, { ~clickSubFreq });
-
-			// Fire the click Synth on the MONITOR bus, NOT the main bus
-			Synth(\click, [
-				\out,  ~clickOutBus,
-				\freq, freq,
-				\duration, ~clickDuration,
-				\amp,  ~clickAmp
-			]);
-
-			// Advance beat counter (wraps at time signature)
+			var freq = if (beat == 0, { ~clickDownbeatFreq }, { ~clickSubFreq });
+			// Click goes to IEM bus ONLY — confirmed by hardcoding ~iemOutBus here.
+			// If ~iemOutBus is nil (rare edge case), skip the click rather than crash.
+			if (~iemOutBus.notNil, {
+				Synth(\click, [
+					\out,      ~iemOutBus,
+					\freq,     freq,
+					\duration, ~clickDuration,
+					\amp,      ~clickAmp
+				]);
+			});
 			beat = (beat + 1) % ~clockBeats;
-
-			// Wait one beat on the SHARED clock
 			1.0.wait;
 		}
 	};
-
 	~clickRoutine.play(~mainClock);
 	~clickRunning = true;
 	"Click routine started on shared clock.".postln;
 };
 
-// ----- Stop the clock and click -----
 ~stopClock = {
 	if (~clickRoutine.notNil, {
 		~clickRoutine.stop;
@@ -96,16 +78,21 @@
 };
 
 // ----- Change tempo while running -----
+// This is the ONLY function that should change ~mainClock.tempo.
+// It is called by backtrack.scd when a new song is selected.
 ~setBpm = { |newBpm|
+	newBpm = newBpm.clip(20.0, 300.0);
 	if (~mainClock.notNil, {
-		~mainClock.tempo = newBpm / 60;
+		~mainClock.tempo = newBpm / 60.0;
 	});
 	~clockBpm = newBpm;
-	"Tempo set to % BPM.".format(newBpm).postln;
+	"Tempo set to % BPM".format(newBpm).postln;
+	// Notify OLED daemon if the update function exists (defined in backtrack.scd)
+	if (~oledUpdate.notNil, { ~oledUpdate.(); });
 };
 
 // ----- Tap tempo helper -----
-// Call ~tapTempo.() on each beat; after 4 taps the tempo is calculated.
+// Call ~tapTempo.() four times on the beat; BPM is calculated from the last 4 taps.
 ~tapCount = 0;
 ~tapTimes = Array.newClear(4);
 ~tapTempo = {
@@ -117,17 +104,19 @@
 			~tapTimes[(~tapCount - 3 + i) % 4] - ~tapTimes[(~tapCount - 4 + i) % 4];
 		});
 		var avgInterval = intervals.sum / 3;
-		var newBpm = (60.0 / avgInterval).round(1);
+		var newBpm = (60.0 / avgInterval).round(0.5);
 		"Tap tempo: % BPM".format(newBpm).postln;
 		~setBpm.(newBpm);
 	});
 };
 
 // =============================================================================
-// LOOP QUANTIZATION HOOK
+// QUANTIZATION HOOK
 // =============================================================================
-// All loop record/play start/stop actions that need to be quantized to the
-// beat should use ~mainClock rather than spawning independent routines.
+// Use ~mainClock for any beat-synchronized scheduling.
+// Example:
+//   ~mainClock.schedAbs(~mainClock.nextBar, { /* action on next bar */ });
+// =============================================================================
 //
 // When a loop action requires quantization, the loops.scd functions call
 // ~scheduleQuantized, which schedules the action on the next beat boundary

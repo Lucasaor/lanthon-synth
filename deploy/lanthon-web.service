@@ -1,0 +1,33 @@
+# =============================================================================
+# lanthon-web.service — LANTH0N 5YNTH web configuration interface
+# =============================================================================
+# Runs the SvelteKit web app as a Node.js service on port 5000.
+# Access at http://lanth0n.local:5000 (mDNS) or via IP.
+# Can be stopped during performance to free CPU; rig still functions.
+
+[Unit]
+Description=LANTH0N 5YNTH — Web configuration interface
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%PROJECT_DIR%/web
+ExecStart=/usr/bin/node build/index.js
+Environment=PORT=5000
+Environment=HOST=0.0.0.0
+Environment=SC_HOST=127.0.0.1
+Environment=SC_PORT=57120
+
+Restart=on-failure
+RestartSec=10
+# Allow higher restart delay for web — don't starve audio resources
+CPUWeight=50
+IOWeight=50
+
+StandardOutput=append:/var/log/lanth0n/web.log
+StandardError=append:/var/log/lanth0n/web.log
+SyslogIdentifier=lanth0n-web
+
+[Install]
+WantedBy=multi-user.target

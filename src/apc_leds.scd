@@ -1,166 +1,219 @@
 // =============================================================================
-// Step 7 — APC Mini LED Feedback
+// apc_leds.scd — LANTH0N 5YNTH: APC Mini LED state machine
 // =============================================================================
-// Drives the APC Mini's RGB grid LEDs to reflect real loop state so the
-// performer can see what's happening at a glance without looking at a screen.
+// Drives the APC Mini's 8×8 RGB LED grid to reflect the current pad state.
+// LEDs are set by sending MIDI note-on messages back TO the APC Mini.
 //
-// LED colours are set by sending MIDI note-on messages back TO the APC Mini
-// with specific velocity values that map to its built-in colour palette.
+// Grid layout (0-indexed, row 0 = bottom, col 0 = left):
+//   Columns 0–5 : FX Control pads (48 pads)
+//   Columns 6–7 : Program Change pads (16 pads)
 //
-// APC Mini LED colour palette (velocity → colour):
-//   vel 0  = off (LED dark)
-//   vel 1  = green
-//   vel 2  = green (blinking) — not used here to keep things simple
-//   vel 3  = yellow / amber
-//   vel 4  = yellow (blinking)
-//   vel 5  = red
-//   vel 6  = red (blinking)
+// LED color encoding (velocity values from the original APC Mini palette):
+//   0  = off
+//   1  = green
+//   2  = green blink
+//   3  = yellow / amber
+//   5  = red
+//   6  = red blink
 //
-// We map loop states to colours as follows:
-//   \empty       → off (vel 0)
-//   \recording   → red (vel 5)
-//   \overdubbing → red (vel 5) — same as recording, performer knows context
-//   \playing     → green (vel 1)
-//   \stopped     → amber (vel 3) — has content but not playing
-//   \muted       → amber (vel 3) — has content but silenced
+// LANTH0N 5YNTH color scheme:
+//   FX pad, unconfigured   → off       (vel 0)
+//   FX pad, idle/ready     → yellow    (vel 3)
+//   FX pad, active (on)    → green     (vel 1)
+//   FX pad, editing params → blink grn (vel 2)   — MIDI blink flag
+//   PC pad, empty          → off       (vel 0)
+//   PC pad, saved/inactive → red+blink (vel 6)   ← closest to "purple" in palette
+//   PC pad, currently live → green     (vel 1)   ← closest to "blue" in palette
 //
-// For the REC row (row 1), we always show red when a loop has content
-// (so the performer knows which columns are "armed-able"), dimmed when empty.
-
-// =============================================================================
-// MIDI OUTPUT TO APC MINI
-// =============================================================================
-// We need a MIDIOut connected to the APC Mini to send LED updates.
-// The MIDIOut port is set up in midi_routing.scd / main.scd.
-
-~apcMidiOut = nil;   // MIDIOut instance — set during init
-
-// Colour constants (velocity values)
-~ledOff    = 0;
-~ledGreen  = 1;
-~ledAmber  = 3;
-~ledRed    = 5;
-
-// State → LED colour mapping
-~ledColorForState = { |state|
-	switch (state,
-		\empty,        ~ledOff,
-		\recording,    ~ledRed,
-		\overdubbing,  ~ledRed,
-		\playing,      ~ledGreen,
-		\stopped,      ~ledAmber,
-		\muted,        ~ledAmber,
-		~ledOff  // fallback
-	);
-};
-
-// =============================================================================
-// LED UPDATE FUNCTIONS
+// NOTE: The original APC Mini does NOT have a true purple or blue LED.
+// We use red-blink for "saved PC" and green for "active PC" as the best
+// available approximation. If you have an APC Mini Mk2 with full RGB, update
+// the constants below to the correct velocity codes (see Mk2 MIDI docs).
 // =============================================================================
 
-// Send a single LED update to a specific (col, row) on the APC Mini grid.
-// The APC Mini listens for note-on messages on its own MIDI channel.
-// Channel is typically channel 1 (MIDI channel 0 in SC's 0-based indexing).
+// =============================================================================
+// COLOR CONSTANTS
+// =============================================================================
+
+~ledOff         = 0;
+~ledGreen       = 1;   // FX active
+~ledGreenBlink  = 2;   // FX editing (parameter-edit mode)
+~ledYellow      = 3;   // FX idle/ready
+~ledRedBlink    = 6;   // PC pad saved (closest to purple in APC Mini palette)
+~ledRed         = 5;   // not used in normal flow, kept for testing
+
+// =============================================================================
+// MIDI OUTPUT
+// =============================================================================
+
+~apcMidiOut = nil;   // MIDIOut to the APC Mini — set by midi_routing.scd
+
+// Send a single LED update to one pad.
+// col/row are 0-indexed. Note number = row * 8 + col.
 ~apcSendLED = { |col, row, velocity, chan=0|
-	var note = ~apcNoteForCell.(col, row);
+	var note = (row * 8) + col;
 	if (~apcMidiOut.notNil, {
 		~apcMidiOut.noteOn(chan, note, velocity);
 	});
 };
 
-// Update ALL LEDs for a given loop column based on its current state.
-// This is called after every state transition in loops.scd.
-~updateAPCled = { |loopIndex|
-	var col = loopIndex;
-	var state = ~loopStates[loopIndex];
-	var color = ~ledColorForState.(state);
+// =============================================================================
+// PAD GRID REFERENCES
+// =============================================================================
 
-	// Row 0 (STOP)  → same as PLAY indicator
-	// Row 1 (REC)   → red if has content, off if empty
-	// Row 2 (PLAY)  → green if playing/overdubbing, amber if stopped, off if empty
-	// Row 3 (MUTE)  → amber if muted, off otherwise
-	// Row 7 (CLEAR) → always dim green (available)
-	// Other rows    → off
+// Convert pad (col, row) to MIDI note (0-indexed, row 0 = bottom).
+~apcNoteForCell = { |col, row|
+	(row * 8) + col
+};
 
-	// REC row: always lit red if the loop has content (to indicate it can be
-	// re-recorded or overdubbed), off if empty.
-	if (state == \empty, {
-		~apcSendLED.(col, 1, ~ledOff);
-	}, {
-		~apcSendLED.(col, 1, ~ledRed);
-	});
+// Convert MIDI note back to [col, row], or nil if out of 8×8 range.
+~apcCellForNote = { |note|
+	if ((note >= 0) and: { note < 64 }, {
+		[note % 8, note.div(8)]
+	}, { nil })
+};
 
-	// PLAY / STOP rows
-	switch (state,
-		\playing,      {
-			~apcSendLED.(col, 0, ~ledGreen);
-			~apcSendLED.(col, 2, ~ledGreen);
-		},
-		\overdubbing,  {
-			~apcSendLED.(col, 0, ~ledGreen);
-			~apcSendLED.(col, 2, ~ledGreen);
-		},
-		\recording,    {
-			~apcSendLED.(col, 0, ~ledRed);
-			~apcSendLED.(col, 2, ~ledRed);
-		},
-		\stopped,      {
-			~apcSendLED.(col, 0, ~ledAmber);
-			~apcSendLED.(col, 2, ~ledAmber);
-		},
-		\muted,        {
-			~apcSendLED.(col, 0, ~ledOff);
-			~apcSendLED.(col, 2, ~ledAmber);
-		},
-		\empty,        {
-			~apcSendLED.(col, 0, ~ledOff);
-			~apcSendLED.(col, 2, ~ledOff);
+// =============================================================================
+// FX PAD LED UPDATE
+// =============================================================================
+// FX pad state is tracked in apc_pads.scd as ~fxPadState[row][col].
+// Valid states:
+//   \off      — pad not configured (no oscillator/effect assigned to this slot)
+//   \idle     — configured, not currently active → yellow LED
+//   \active   — currently on → green LED
+//   \editing  — active + in parameter-edit mode → blinking green LED
+
+~ledForFXState = { |state|
+	switch(state,
+		\off,     ~ledOff,
+		\idle,    ~ledYellow,
+		\active,  ~ledGreen,
+		\editing, ~ledGreenBlink,
+		/* default */ ~ledOff
+	)
+};
+
+// Update a single FX pad LED from its current state.
+~updateFXPadLED = { |col, row|
+	var state = ~fxPadState[row][col];   // defined in apc_pads.scd
+	var vel   = ~ledForFXState.(state);
+	~apcSendLED.(col, row, vel);
+};
+
+// Refresh all 48 FX pad LEDs (cols 0-5, rows 0-7).
+~refreshFXPadLEDs = {
+	8.do { |row|
+		6.do { |col|
+			~updateFXPadLED.(col, row);
 		}
-	);
-
-	// MUTE row
-	if (state == \muted, {
-		~apcSendLED.(col, 3, ~ledAmber);
-	}, {
-		~apcSendLED.(col, 3, ~ledOff);
-	});
-
-	// CLEAR row — always lit green (available action)
-	~apcSendLED.(col, 7, ~ledGreen);
-
-	// Rows 4-6: off (unused)
-	[4, 5, 6].do { |r| ~apcSendLED.(col, r, ~ledOff); };
+	}
 };
 
-// Update ALL LEDs for ALL 8 columns — called on init and after clear-all.
+// =============================================================================
+// PC PAD LED UPDATE
+// =============================================================================
+// PC pad state is tracked in apc_pads.scd as ~pcPadState[pcIndex].
+// pcIndex 0-15 maps to (col 6 or 7, rows 0-7): col = 6 + (pcIndex % 2), row = pcIndex.div(2)
+// Valid states:
+//   \empty  — no snapshot saved → off
+//   \saved  — snapshot saved, not active → red-blink (purple approximation)
+//   \active — this snapshot is currently loaded → green (blue approximation)
+
+~pcIndexToCell = { |pcIndex|
+	// PC pads: column 6 = even pcIndex, column 7 = odd pcIndex
+	// row 0 (bottom) = pcIndex 0,1; row 1 = pcIndex 2,3; etc.
+	var col = 6 + (pcIndex % 2);
+	var row = pcIndex.div(2);
+	[col, row]
+};
+
+~ledForPCState = { |state|
+	switch(state,
+		\empty,  ~ledOff,
+		\saved,  ~ledRedBlink,
+		\active, ~ledGreen,
+		/* default */ ~ledOff
+	)
+};
+
+~updatePCPadLED = { |pcIndex|
+	var state = ~pcPadState[pcIndex];    // defined in apc_pads.scd
+	var vel   = ~ledForPCState.(state);
+	var cell  = ~pcIndexToCell.(pcIndex);
+	~apcSendLED.(cell[0], cell[1], vel);
+};
+
+// Refresh all 16 PC pad LEDs.
+~refreshPCPadLEDs = {
+	16.do { |i| ~updatePCPadLED.(i); }
+};
+
+// =============================================================================
+// FULL GRID REFRESH
+// =============================================================================
+// Called after Notes Mode exit or after a full state reset.
 ~refreshAllLEDs = {
-	~numLoops.do { |i| ~updateAPCled.(i); };
+	~refreshFXPadLEDs.();
+	~refreshPCPadLEDs.();
+};
+
+// Snapshot of all LED states before Notes Mode entry (for restoration on exit).
+~ledSnapshotBeforeNotes = nil;
+
+~snapshotLEDs = {
+	var snap = Array.new(64);
+	8.do { |row|
+		8.do { |col|
+			var state, vel;
+			if (col < 6, {
+				// FX pad
+				state = if (~fxPadState.notNil, { ~fxPadState[row][col] }, { \off });
+				vel   = ~ledForFXState.(state);
+			}, {
+				// PC pad
+				var pcIdx = row * 2 + (col - 6);
+				state = if (~pcPadState.notNil, { ~pcPadState[pcIdx] }, { \empty });
+				vel   = ~ledForPCState.(state);
+			});
+			snap.add(vel);
+		}
+	};
+	snap
+};
+
+~restoreLEDSnapshot = { |snap|
+	if (snap.notNil, {
+		64.do { |n|
+			var col = n % 8;
+			var row = n.div(8);
+			~apcSendLED.(col, row, snap[n]);
+		}
+	});
 };
 
 // =============================================================================
-// LED TEST (confirms MIDI output wiring)
+// LED TEST
 // =============================================================================
-// Run this to verify the APC Mini is receiving LED updates correctly.
-// All grid LEDs should cycle through off → green → amber → red → off.
-
+// Run ~testLEDs.() to verify the APC Mini is receiving LED updates correctly.
+// All grid LEDs cycle: off → yellow → green → red-blink → off.
 ~testLEDs = {
-	var colors = [~ledOff, ~ledGreen, ~ledAmber, ~ledRed, ~ledOff];
-	"LED test: cycling all grid buttons through colours...".postln;
+	var seq = [~ledOff, ~ledYellow, ~ledGreen, ~ledRedBlink, ~ledOff];
+	"LED test: cycling all 64 pads through colour states...".postln;
 	Routine {
-		colors.do { |color, ci|
-			("  Colour % / 5".format(ci + 1)).postln;
+		seq.do { |vel, ci|
+			("  Step % / 5 (vel=%)".format(ci + 1, vel)).postln;
 			64.do { |n|
 				var col = n % 8;
-				var row = (n / 8).asInteger;
-				~apcSendLED.(col, row, color);
+				var row = n.div(8);
+				~apcSendLED.(col, row, vel);
 			};
-			0.5.wait;
+			0.4.wait;
 		};
-		"LED test complete — restoring loop state LEDs.".postln;
+		"LED test done — restoring pad state.".postln;
 		~refreshAllLEDs.();
 	}.play;
 };
 
 "APC LED subsystem loaded.".postln;
-"  ~apcMidiOut must be set to the APC Mini MIDIOut instance.".postln;
+"  Set ~apcMidiOut to the APC Mini MIDIOut instance.".postln;
 "  Run ~testLEDs.() to verify LED wiring.".postln;

@@ -1,0 +1,28 @@
+# =============================================================================
+# lanthon-oled.service — LANTH0N 5YNTH OLED display daemon
+# =============================================================================
+# Drives the SSD1306 I2C OLED display (setlist/song/state monitor).
+# Must start AFTER the SC engine so OSC messages have a target.
+
+[Unit]
+Description=LANTH0N 5YNTH — OLED display daemon
+After=network.target lanthon-synth.service
+Wants=lanthon-synth.service
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%PROJECT_DIR%
+ExecStart=/usr/bin/python3 %PROJECT_DIR%/oled_daemon.py
+Environment=LANTH0N_OLED_PORT=9000
+Environment=LANTH0N_I2C_PORT=1
+Environment=LANTH0N_I2C_ADDR=0x3C
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/lanth0n/oled.log
+StandardError=append:/var/log/lanth0n/oled.log
+SyslogIdentifier=lanth0n-oled
+
+[Install]
+WantedBy=multi-user.target

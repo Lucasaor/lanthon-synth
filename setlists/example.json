@@ -1,0 +1,16 @@
+{
+  "name": "Example Setlist",
+  "songs": [
+    {
+      "name": "Test Song 1",
+      "artist": "Test Artist",
+      "tempo": 120,
+      "notes": "Place 'Test Song 1 (VS).wav', 'Test Song 1 (click).wav', 'Test Song 1 (Dica).wav' in the media/ directory"
+    },
+    {
+      "name": "Test Song 2",
+      "artist": "Another Artist",
+      "tempo": 140
+    }
+  ]
+}

@@ -1,5 +1,10 @@
 // =============================================================================
-// Step 5 — Loop Tracks (Ndef-based) + APC Mini Grid Control
+// DEPRECATED — loops.scd is superseded by apc_pads.scd in LANTH0N 5YNTH.
+// This file is kept for reference only and is NOT loaded by main.scd.
+// The Ndef-based loop architecture has been replaced by the APC Mini FX pad
+// state machine. See src/apc_pads.scd for the new architecture.
+// =============================================================================
+// Step 5 — Loop Tracks (Ndef-based) + APC Mini Grid Control [ARCHIVED]
 // =============================================================================
 // Each of the 8 APC Mini columns maps to one independent loop track backed
 // by an Ndef.  The grid buttons control record/play/stop/mute/clear per

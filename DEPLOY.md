@@ -1,264 +1,209 @@
-# DEPLOY.md — Deployment Guide
+# DEPLOY.md — LANTH0N 5YNTH Deployment Guide
 
-How to go from a **fresh Raspberry Pi OS (Bookworm)** install to a fully
-functional, auto-booting headless live performance rig.
+How to go from a **fresh Raspberry Pi OS Bookworm Lite** to a fully functional
+headless boot of LANTH0N 5YNTH with three auto-starting services.
 
 ---
 
 ## Prerequisites
 
-- Raspberry Pi Zero 2W (quad-core Cortex-A53, 512MB RAM)
-- Raspberry Pi OS Bookworm (Lite recommended — no desktop needed)
-- USB audio interface (class-compliant) or I2S DAC HAT
-- Powered USB hub (required — the Zero 2W has only one micro-USB OTG port)
-- Three MIDI controllers (APC Mini, Easypad 12, SMK25) connected via the hub
-- Internet access for initial package installation
+| Item | Notes |
+|------|-------|
+| Raspberry Pi Zero 2W | 512 MB RAM, quad-core Cortex-A53 |
+| Raspberry Pi OS **Bookworm Lite** (64-bit) | No desktop needed |
+| USB audio interface (class-compliant, ≥4 outputs) | FOH = ch 1–2, IEM = ch 3–4 |
+| SSD1306 OLED (0.96", I2C, SDA/SCL on GPIO 2/3) | Optional but recommended |
+| Powered USB hub | Required (Pi has one OTG port) |
+| AKAI APC Mini | USB, plugged into hub |
+| Worlde Easypad 12 | USB, plugged into hub |
+| M-VAVE SMK 25 | Bluetooth MIDI |
+| Internet access on Pi | For initial package installation |
 
 ---
 
 ## Quick Start (Automated)
 
 ```bash
-# 1. Clone the repository on the Pi
+# 1. Flash Raspberry Pi OS Bookworm Lite to SD card with SSH enabled
+#    (use Raspberry Pi Imager, set hostname=lanth0n, enable SSH, set user=pi)
+
+# 2. SSH into the Pi after first boot
+ssh pi@lanth0n.local
+
+# 3. Clone the repo
 git clone https://github.com/lucasaor/lanthon-synth.git
 cd lanthon-synth
 
-# 2. Run the setup script
+# 4. Run the automated setup (takes ~5-10 min)
 sudo ./deploy/setup.sh
 
-# 3. Reboot
+# 5. Configure the JACK audio device (find your device index)
+aplay -l                  # find your USB audio interface
+sudo nano /usr/local/bin/lanthon-jack-start.sh
+# Change: -d alsa -d hw:USB  →  -d alsa -d hw:N  (N = device index)
+
+# 6. Pair the SMK25 Bluetooth keyboard (first time only)
+bluetoothctl
+  power on
+  agent on
+  scan on
+  # Wait for "SMK-25" to appear in the scan output
+  pair <MAC_ADDRESS>
+  trust <MAC_ADDRESS>
+  connect <MAC_ADDRESS>
+  exit
+
+# 7. Reboot
 sudo reboot
 
-# 4. After reboot, the rig starts automatically.
-#    Check status:
-sudo systemctl status lanthon-synth
-sudo journalctl -u lanthon-synth -f
+# 8. After reboot (~30 seconds), check service status
+sudo systemctl status lanth0n-synth lanth0n-oled lanth0n-web
 ```
 
 ---
 
-## Manual Setup (Step-by-Step)
+## Services Overview
 
-### Step 1: Flash Raspberry Pi OS
+After installation, three `systemd` services run on boot:
 
-1. Download [Raspberry Pi Imager](https://www.raspberrypi.com/software/)
-2. Flash **Raspberry Pi OS Lite (Bookworm, 64-bit)** to a microSD card
-3. Before ejecting, configure:
-   - Hostname: `lanthon-synth` (or your choice)
-   - SSH: enabled
-   - User: `pi` (or your choice)
-   - Wi-Fi: pre-configure if not using Ethernet
+| Service             | Description                          | Port |
+|---------------------|--------------------------------------|------|
+| `lanth0n-synth`     | SuperCollider audio engine (sclang)  | 57120 (OSC) |
+| `lanth0n-oled`      | Python OLED display daemon           | 9000 (OSC in) |
+| `lanth0n-web`       | SvelteKit web configuration UI       | 5000 (HTTP) |
 
-### Step 2: First Boot & SSH
-
+Manage services:
 ```bash
-ssh pi@lanthon-synth.local
-# or use the IP address
-```
-
-### Step 3: System Update
-
-```bash
-sudo apt update && sudo apt upgrade -y
-sudo reboot
-```
-
-### Step 4: Install Dependencies
-
-```bash
-sudo apt install -y \
-  supercollider \
-  supercollider-server \
-  supercollider-sclang \
-  jackd2 \
-  jack-tools \
-  git \
-  cpufrequtils \
-  usbutils \
-  alsa-utils
-```
-
-### Step 5: Set CPU Governor to `performance`
-
-```bash
-# Immediate:
-echo "performance" | sudo tee /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
-
-# Persistent:
-sudo bash -c 'cat > /etc/default/cpufrequtils << EOF
-GOVERNOR="performance"
-MAX_SPEED="0"
-MIN_SPEED="0"
-EOF'
-sudo systemctl enable cpufrequtils
-```
-
-### Step 6: Configure Real-Time Audio Privileges
-
-```bash
-sudo usermod -a -G audio pi
-
-sudo bash -c 'cat > /etc/security/limits.d/99-audio.conf << EOF
-@audio   -  rtprio     95
-@audio   -  memlock    unlimited
-@audio   -  nice       -19
-EOF'
-```
-
-### Step 7: Clone the Project
-
-```bash
-git clone https://github.com/lucasaor/lanthon-synth.git /home/pi/lanthon-synth
-```
-
-### Step 8: Run Calibration
-
-```bash
-# Connect all three MIDI controllers via the powered USB hub
-# Run the calibration tool:
-sclang /home/pi/lanthon-synth/src/calibration.scd
-
-# Press every pad, key, fader, and grid button on each controller.
-# Copy the output into CONTROLS.md.
-# Update ~srcID_APC, ~srcID_Easy, ~srcID_SMK in midi_routing.scd.
-# Update ~apcFaderMap and ~easyPadMap with real note/CC numbers.
-```
-
-### Step 9: Install the systemd Service
-
-```bash
-sudo cp /home/pi/lanthon-synth/deploy/lanthon-synth.service /etc/systemd/system/
-sudo sed -i 's|%PROJECT_DIR%|/home/pi/lanthon-synth|g' /etc/systemd/system/lanthon-synth.service
-sudo sed -i 's|%USER%|pi|g' /etc/systemd/system/lanthon-synth.service
-sudo systemctl daemon-reload
-sudo systemctl enable lanthon-synth
-```
-
-### Step 10: Test Before Rebooting
-
-```bash
-# Start the service manually to verify:
-sudo systemctl start lanthon-synth
-
-# Check logs:
-sudo journalctl -u lanthon-synth -f
-
-# Check CPU governor:
-cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
-# Should print: performance
-
-# Press controllers, verify audio + LEDs work.
-
-# Stop the service:
-sudo systemctl stop lanthon-synth
-```
-
-### Step 11: Reboot and Verify Auto-Start
-
-```bash
-sudo reboot
-
-# After boot (give it ~30 seconds):
-ssh pi@lanthon-synth.local
-sudo systemctl status lanthon-synth
-# Should show: active (running)
-
-# Check for xruns:
-sudo journalctl -u lanthon-synth | grep -i xrun
+sudo systemctl status lanth0n-synth     # check status
+sudo systemctl restart lanth0n-synth    # restart after config change
+sudo journalctl -u lanth0n-synth -f     # live logs
+sudo systemctl stop lanth0n-web         # stop web UI during performance
 ```
 
 ---
 
-## Audio Interface Notes
+## Audio Routing
 
-### USB Audio (Recommended)
+The Pi requires a class-compliant USB audio interface with **at least 4 output channels**.
 
-Most class-compliant USB audio interfaces work out of the box.  The JACK start
-script auto-detects the first USB device.  Override with:
+| SC Bus | Physical Channels | Destination |
+|--------|-----------------|-------------|
+| 0–1    | 1–2             | FOH (main PA / VS backtrack) |
+| 2–3    | 3–4             | IEM (click + cue, monitor only) |
 
+JACK is configured in `/usr/local/bin/lanthon-jack-start.sh`. Key flags:
 ```bash
-export JACK_DEVICE="hw:USB"
+jackd -R -d alsa \
+  -d hw:USB \    # ← change to hw:N matching your interface (aplay -l)
+  -r 44100 \
+  -p 256 \       # buffer size: lower = less latency, more risk of xruns
+  -n 2 \         # number of JACK periods
+  -o 4 \         # 4 output channels
+  -i 2
 ```
 
-Edit `/usr/local/bin/lanthon-jack-start.sh` for permanent changes.
+---
 
-### I2S DAC HAT
+## I2C OLED Wiring (SSD1306)
 
-If using an I2S DAC (e.g., Pisound, Audio Injector, HifiBerry):
+| OLED Pin | Pi GPIO Pin | Pi Physical Pin |
+|----------|-------------|-----------------|
+| VCC      | 3.3V        | Pin 1           |
+| GND      | GND         | Pin 6           |
+| SDA      | GPIO 2      | Pin 3           |
+| SCL      | GPIO 3      | Pin 5           |
 
-1. Enable the overlay in `/boot/firmware/config.txt`:
+Verify detection: `i2cdetect -y 1` → should show `3c` at address 0x3C.
+
+The OLED address can be changed via `LANTH0N_I2C_ADDR` env var in
+`/etc/systemd/system/lanth0n-oled.service`.
+
+---
+
+## Bluetooth MIDI (SMK25 Pairing)
+
+1. Pair once with `bluetoothctl` (see Quick Start above).
+2. The `auto-connect` feature in bluez should reconnect on boot.
+3. If it doesn't auto-reconnect, add a post-boot connect script:
+   ```bash
+   # /etc/rc.local (add before "exit 0"):
+   sleep 15 && bluetoothctl connect <SMK25_MAC> &
    ```
-   dtoverlay=hifiberry-dac
-   ```
-2. Set `JACK_DEVICE="hw:sndrpihifiberry"` (or the correct ALSA device name)
-3. I2S may have higher latency than USB — test with `jack_bufsize`
-
-### Separate Click/Monitor Output
-
-The click signal is routed to bus 2-3 (separate from main bus 0-1).  
-If your audio interface has 4+ output channels:
-- Main (FOH): outputs 1-2
-- Click (monitor): outputs 3-4
-
-If only stereo output is available, the click is hard-panned left and main
-mix panned right — split at the mixer.  Edit `~clickOutBus` and `~mainOutBus`
-in `synths.scd` to change this.
+4. The MIDI routing code auto-detects the SMK25 when it connects and
+   re-registers handlers. No manual restart required.
 
 ---
 
-## Troubleshooting
+## CPU Performance Governor
 
-| Symptom                              | Likely Cause                      | Fix                                    |
-|--------------------------------------|-----------------------------------|----------------------------------------|
-| Service fails to start               | JACK can't find audio device      | Check `aplay -l`, set `JACK_DEVICE`    |
-| Audio glitches / xruns               | CPU governor not `performance`    | Run Step 5 again                       |
-| Audio glitches / xruns               | Buffer too small                  | Increase `-p` in JACK script (try 256) |
-| MIDI controllers not responding      | srcID not set after calibration   | Set `~srcID_*` globals, update CONTROLS.md |
-| APC LEDs not updating                | MIDI Out not connected            | Check USB cable, verify `~apcMidiOut`  |
-| "Cannot connect to server"           | scsynth not running               | `scsynth -u 57110` manually to test    |
-| Out of memory                        | Buffer too large or too many      | Reduce `~loopDuration` in loops.scd    |
+The setup script sets the CPU to `performance` mode persistently via `/etc/rc.local`.
+Verify: `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` → should print `performance`.
 
 ---
 
-## Useful Commands (on the Pi)
+## Post-Deployment Calibration
+
+After the rig is running, run the calibration tool to capture real MIDI mappings:
 
 ```bash
-# Service control
-sudo systemctl start lanthon-synth
-sudo systemctl stop lanthon-synth
-sudo systemctl restart lanthon-synth
-sudo systemctl status lanthon-synth
+# On the Pi (SSH):
+sclang src/calibration.scd
 
-# Live log tail
-sudo journalctl -u lanthon-synth -f
+# Then press every button/fader/pad on each controller.
+# Copy the srcID values and note/CC numbers into CONTROLS.md.
+# Update the device name fragments in src/midi_routing.scd if needed.
+```
 
-# CPU governor status
-cat /sys/devices/system/cpu/cpufreq/policy0/scaling_governor
+---
 
-# List audio devices
-aplay -l
-arecord -l
+## Updating the Rig
 
-# List USB devices
-lsusb
+```bash
+cd ~/lanthon-synth
+git pull
+# Rebuild web interface if web/ changed:
+cd web && npm install && npm run build && cd ..
+# Restart services:
+sudo systemctl restart lanth0n-synth lanth0n-oled lanth0n-web
+```
 
-# List MIDI devices
-amidi -l
-aconnect -l
+---
+
+## Log Locations
+
+| Log file                         | Contents                    |
+|----------------------------------|-----------------------------|
+| `/var/log/lanth0n/synth.log`     | SuperCollider output + errors |
+| `/var/log/lanth0n/oled.log`      | OLED daemon output          |
+| `/var/log/lanth0n/web.log`       | Web interface output        |
+| `/var/log/lanth0n/jack.log`      | JACK audio server output    |
+
+Tail all logs:
+```bash
+tail -f /var/log/lanth0n/*.log
+```
+
+---
+
+## Troubleshooting Boot Issues
+
+```bash
+# Check all service statuses at once
+sudo systemctl status lanth0n-synth lanth0n-oled lanth0n-web
 
 # Check JACK
-jack_lsp
-jack_bufsize
+cat /var/log/lanth0n/jack.log
+
+# Verify OLED I2C
+i2cdetect -y 1
+
+# Check audio devices
+aplay -l && arecord -l
+
+# Verify CPU governor
+cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+
+# Check BT
+bluetoothctl show | grep Powered
 ```
 
----
-
-## Updating the Code
-
-```bash
-cd /home/pi/lanthon-synth
-git pull
-sudo systemctl restart lanthon-synth
-```
-
-No reboot needed — the service restart is sufficient.
