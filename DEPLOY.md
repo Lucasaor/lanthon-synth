@@ -200,6 +200,33 @@ tail -f /var/log/lanth0n/*.log
 
 ---
 
+## Known Package Differences: Pi OS vs Debian Bookworm
+
+The setup script handles these automatically, but here is what differs:
+
+| Package            | Debian Bookworm | Pi OS Bookworm | Notes |
+|--------------------|-----------------|----------------|-------|
+| `supercollider-sclang` | ✓ available | ✗ not split | Installed as `supercollider` meta-package |
+| `supercollider-server` | ✓ available | ✗ not split | Same as above |
+| `jack-tools`       | ✓ available     | ✗ not in repos | Not needed — `jackd2` provides all runtime tools |
+| `cpufrequtils`     | ✓ available     | ✗ not in repos | Not needed — CPU governor set via `/sys/` directly |
+| `a2jmidid`         | ✓ available     | ✓ available    | ALSA→JACK MIDI bridge (optional but recommended) |
+
+If `sclang` is missing after install, verify with:
+```bash
+which sclang        # should print /usr/bin/sclang
+sclang --version    # should print a version number
+```
+
+If `sclang` is not present, install SuperCollider manually:
+```bash
+sudo apt-get install supercollider
+# If still not found, check if sclang is provided by the package:
+dpkg -L supercollider | grep sclang
+```
+
+---
+
 ## Troubleshooting Boot Issues
 
 ```bash

@@ -45,16 +45,48 @@ fi
 # ── Step 1: System packages ──────────────────────────────────────────────────
 echo "=== [1/9] Installing system packages ==="
 apt-get update -qq
-apt-get install -y -qq \
-  supercollider supercollider-server supercollider-sclang \
-  jackd2 jack-tools \
+
+# ── 1a. Core packages — must all be present in Pi OS Bookworm ───────────────
+apt-get install -y \
+  jackd2 \
   python3 python3-pip python3-smbus \
   i2c-tools \
   nodejs npm \
   ffmpeg \
-  git cpufrequtils usbutils alsa-utils \
+  git usbutils alsa-utils \
   avahi-daemon libnss-mdns \
   bluetooth bluez
+
+# ── 1b. SuperCollider ─────────────────────────────────────────────────────────
+# Debian Bookworm splits SC into supercollider-sclang + supercollider-server.
+# Raspberry Pi OS Bookworm ships a monolithic 'supercollider' package instead.
+# Try split packages first (works on stock Debian); fall back to meta-package.
+echo "  Installing SuperCollider..."
+if apt-get install -y supercollider-sclang supercollider-server 2>/dev/null; then
+  echo "  SuperCollider installed via split packages."
+elif apt-get install -y supercollider 2>/dev/null; then
+  echo "  SuperCollider installed via meta-package."
+else
+  echo "  WARNING: SuperCollider not found in standard repos."
+  echo "  Install manually: sudo apt-get install supercollider"
+  echo "  Or see: https://supercollider.github.io/downloads"
+fi
+
+# Verify sclang is actually available
+if ! command -v sclang &>/dev/null; then
+  echo "  WARNING: sclang not in PATH after install — check SuperCollider package."
+fi
+
+# ── 1c. Optional packages — skip gracefully if not in repos ──────────────────
+# a2jmidid: ALSA-to-JACK MIDI bridge (useful but not critical)
+# bluez-tools: bt-device CLI helper
+# jack-tools: NOT available on Pi OS Bookworm (skipped)
+# cpufrequtils: NOT available on Pi OS Bookworm (CPU governor set via sysfs in Step 2)
+for pkg in a2jmidid bluez-tools; do
+  apt-get install -y "$pkg" 2>/dev/null && \
+    echo "  Installed optional package: $pkg" || \
+    echo "  Optional package not available (skipped): $pkg"
+done
 
 echo "  Packages installed."
 
