@@ -14,7 +14,7 @@ headless boot of LANTH0N 5YNTH with three auto-starting services.
 | USB audio interface (class-compliant, ≥4 outputs) | FOH = ch 1–2, IEM = ch 3–4 |
 | SSD1306 OLED (0.96", I2C, SDA/SCL on GPIO 2/3) | Optional but recommended |
 | Powered USB hub | Required (Pi has one OTG port) |
-| AKAI APC Mini | USB, plugged into hub |
+| AKAI APC Mini **v2** | USB, plugged into hub |
 | Worlde Easypad 12 | USB, plugged into hub |
 | M-VAVE SMK 25 | Bluetooth MIDI |
 | Internet access on Pi | For initial package installation |
@@ -66,11 +66,13 @@ sudo systemctl status lanth0n-synth lanth0n-oled lanth0n-web
 
 After installation, three `systemd` services run on boot:
 
-| Service             | Description                          | Port |
-|---------------------|--------------------------------------|------|
-| `lanth0n-synth`     | SuperCollider audio engine (sclang)  | 57120 (OSC) |
-| `lanth0n-oled`      | Python OLED display daemon           | 9000 (OSC in) |
-| `lanth0n-web`       | SvelteKit web configuration UI       | 5000 (HTTP) |
+| Service             | Description                                  | Port |
+|---------------------|----------------------------------------------|------|
+| `lanth0n-synth`     | SuperCollider audio engine (sclang)          | 57120 (OSC) |
+| `lanth0n-oled`      | Python OLED display daemon                   | 9000 (OSC in) |
+| `lanth0n-web`       | SvelteKit web configuration UI               | 5000 (HTTP) |
+
+> The loop engine (`src/loops.scd`) runs **inside** `lanth0n-synth` — it is loaded by `main.scd` and shares the same process.
 
 Manage services:
 ```bash
@@ -149,10 +151,23 @@ After the rig is running, run the calibration tool to capture real MIDI mappings
 # On the Pi (SSH):
 sclang src/calibration.scd
 
-# Then press every button/fader/pad on each controller.
+# Then press every button/fader/pad/knob on each controller.
 # Copy the srcID values and note/CC numbers into CONTROLS.md.
 # Update the device name fragments in src/midi_routing.scd if needed.
+# For SMK25 knob CCs: update ~smkKnobMap in src/midi_routing.scd or
+#   use the web MIDI-learn page at http://lanth0n.local:5000/midi
 ```
+
+## Initial Configuration
+
+After calibration, configure the rig via the web interface:
+
+1. **Upload samples** for Worlde pads and SMK25 pads (Files page).
+2. **Create a setlist** with at least one song to test backtrack (Setlists page).
+3. **Assign Worlde pad samples** (Worlde Pads page).
+4. **Assign SMK25 pad samples** (SMK25 Pads page) if using pad samples.
+5. **Verify SMK25 knob CCs** match the defaults in CONTROLS.md (MIDI Map page).
+6. **Set APC Mini loop length** on row 7 (default: pad 1 = 2 bars).
 
 ---
 

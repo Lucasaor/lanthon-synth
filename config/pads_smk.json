@@ -1,0 +1,5 @@
+{
+  "_comment": "SMK25 pad sample assignments. Populate via web UI or edit here.",
+  "_note": "note: MIDI note number sent by each SMK25 pad (capture with calibration.scd)",
+  "pads": []
+}

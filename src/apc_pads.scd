@@ -2,98 +2,68 @@
 // apc_pads.scd — LANTH0N 5YNTH: APC Mini FX pad + Program Change state machine
 // =============================================================================
 //
-// Grid layout (0-indexed, row 0 = bottom, col 0 = leftmost):
+// Grid zones (0-indexed, row 0 = bottom, col 0 = leftmost):
 //
-//   Columns 0–5 : FX Control pads (48 pads)
-//   Columns 6–7 : Program Change pads (16 pads)
+//   Row 7 (top)              : Metronome / loop-length selector ← loops.scd
+//   Row 6                    : Loop track controls (8 tracks)   ← loops.scd
+//   Rows 0–5, Cols 0–5  : FX Control pads (36 pads)           ← this file
+//   Rows 0–5, Cols 6–7  : Program Change pads (12 pads)       ← this file
 //
-//   Row | Function
+//   Row | Function (FX pads)
 //   ----+---------
-//    0  | Oscillator selection (col 0=Sq, 1=Saw, 2=Sup, 3=Sine, 4=TB303, 5=Noise)
-//    1  | Octave Down (one layer per column's oscillator)
+//    0  | Oscillator selection (Sq/Saw/Sup/Sine/TB303/Noise per col 0–5)
+//    1  | Octave Down
 //    2  | Octave Up
 //    3  | Distortion
-//    4  | Tremolo / Envelope LFO
+//    4  | Delay
 //    5  | Reverb
-//    6  | LPF
-//    7  | HPF
 //
-// FX pad states:
-//   \off     — not configured (no action assigned)
-//   \idle    — configured but not active → yellow LED
-//   \active  — active (toggle on) → green LED
-//   \editing — active + parameter edit mode → blinking green LED
-//
-// PC pad states:
-//   \empty  — no snapshot saved
-//   \saved  — snapshot saved, not current → red-blink LED
-//   \active — current active snapshot → green LED
-//
-// HOLD-TO-SAVE (PC pads) and HOLD-TO-EDIT (FX pads):
-//   Both use a 2-second hold timer.  Timers are non-blocking (AppClock Routine).
-//   No global blocking; audio never pauses.
+// FX pad states:  \off (unconfigured), \idle (yellow), \active (green)
+// PC pad states:  \empty (off), \saved (purple), \active (blue)
 // =============================================================================
 
 // =============================================================================
 // PAD STATE ARRAYS
 // =============================================================================
 
-// ~fxPadState[row][col]  — 8 rows × 6 columns
-~fxPadState = Array.fill(8, { Array.fill(6, { \off }) });
+// ~fxPadState[row][col]  — 6 rows × 6 columns (rows 6-7 managed by loops.scd)
+~fxPadState = Array.fill(6, { Array.fill(6, { \off }) });
 
-// Which row-0 oscillator columns are configured (set from config file or web UI)
-// By default, all 6 oscillator slots are idle (configured but not active).
+// All 36 FX pads start idle (configured, not active)
 ~initFXPadState = {
-	// Row 0: all 6 oscillator slots are idle (ready to activate)
-	6.do { |col| ~fxPadState[0][col] = \idle };
-	// Rows 1-7: all idle (effects are present but not active)
-	7.do { |row|
-		if (row > 0, {
-			6.do { |col| ~fxPadState[row][col] = \idle };
-		})
+	6.do { |row|
+		6.do { |col|
+			~fxPadState[row][col] = \idle;
+		}
 	};
 };
 
-// ~pcPadState[pcIndex]   — 16 PC pads (0-15)
+// ~pcPadState[pcIndex]   — 12 PC pads (0–11)
 // pcIndex layout: col 6 = even indices, col 7 = odd
-// row 0 = indices 0,1; row 1 = indices 2,3; ... row 7 = indices 14,15
-~pcPadState = Array.fill(16, { \empty });
+// row 0 = indices 0,1; row 1 = indices 2,3; … row 5 = indices 10,11
+~pcPadState = Array.fill(12, { \empty });
 
 // Currently active PC pad index, or nil if none.
 ~activePCIndex = nil;
 
 // =============================================================================
-// HOLD TIMER STATE
+// HOLD TIMER STATE (PC pads only — FX pad hold-to-edit mode removed)
 // =============================================================================
-
-// FX hold state: tracks if a pad is being held for parameter-edit mode.
-// ~fxHoldRoutine — current hold-timer Routine
-// ~fxEditingPad  — [col, row] of currently-editing pad, or nil
-~fxHoldRoutine = nil;
-~fxEditingPad  = nil;
-
-// PC hold state: tracks if a PC pad is being held to save a snapshot.
 ~pcHoldRoutine = nil;
 ~pcHoldIndex   = nil;
 
 // =============================================================================
-// VOICE PARAMETER STATE (mirrors what SMK25 voices currently have)
+// VOICE PARAMETER STATE (updated by SMK25 knobs / Mod Wheel)
 // =============================================================================
-// ~voiceParams: Dictionary of current global synth parameters.
-// These are applied to every new \lanth0nVoice Synth and updated on running
-// voices when faders move.
+// Applied to every new \lanth0nVoice Synth and updated on running voices.
 ~voiceParams = IdentityDictionary[
 	\amp     -> 0.5,
 	\cutoff  -> 4000,
 	\dryWet  -> 1.0,
 	\attack  -> 0.01,
+	\decay   -> 0.1,
 	\sustain -> 0.7,
 	\release -> 0.3
-];
-
-// Fader→param mapping in normal mode (fader index 0-5 → param key)
-~faderParamMap = [
-	\amp, \cutoff, \dryWet, \attack, \sustain, \release
 ];
 
 // =============================================================================
@@ -113,10 +83,10 @@
 	\sqOctUp, \sawOctUp, \supOctUp, \sineOctUp, \tb303OctUp, \noiseOctUp
 ];
 
-// Effect rows 3-7 → Ndef(\masterFX) active key + FX param table key
-// Row 0 = osc, 1 = octDn, 2 = octUp, 3-7 = effects
-~rowToFXKey = [nil, nil, nil, \dist, \env, \rev, \lpf, \hpf];
-~rowToActiveKey = [nil, nil, nil, \distActive, \envActive, \revActive, \lpfActive, \hpfActive];
+// Effect rows 3-5 → Ndef(\masterFX) active key
+// Rows 0-2 = oscillators/octave doublers; rows 3-5 = effects
+~rowToFXKey    = [nil, nil, nil, \dist, \delay, \rev];
+~rowToActiveKey = [nil, nil, nil, \distActive, \delayActive, \revActive];
 
 // =============================================================================
 // APPLY OSCILLATOR STATE TO RUNNING SYNTHS
@@ -172,84 +142,23 @@
 // =============================================================================
 // FX PAD PRESS HANDLER
 // =============================================================================
-// Called by midi_routing.scd when an APC Mini grid button is pressed
-// (note-on with velocity > 0) in normal (non-Notes-Mode) mode.
 
 ~onFXPadPress = { |col, row|
-	// Safety: only handle cols 0-5, rows 0-7
-	if ((col < 6) and: { row < 8 }, {
-
-		// --- Cancel any ongoing hold timer for this pad ---
-		if (~fxHoldRoutine.notNil, {
-			~fxHoldRoutine.stop; ~fxHoldRoutine = nil;
-		});
-
+	// Safety: only rows 0-5, cols 0-5 (rows 6-7 go to loops.scd)
+	if ((col < 6) and: { row < 6 }, {
 		var state = ~fxPadState[row][col];
-
-		if (state == \editing, {
-			// ── Exit parameter-edit mode ────────────────────────────────
-			~fxPadState[row][col] = \active;
-			~fxEditingPad = nil;
-			~faderMode = \normal;
-			~updateFXPadLED.(col, row);
-			"[APC] Param edit exited for (%, %)".format(col, row).postln;
-
+		if (state == \active, {
+			~fxPadState[row][col] = \idle;
 		}, {
-			// ── Toggle idle ↔ active ────────────────────────────────────
-			if (state == \active, {
-				~fxPadState[row][col] = \idle;
-			}, {
-				if (state == \idle, { ~fxPadState[row][col] = \active; });
-			});
-
-			~updateFXPadLED.(col, row);
-
-			// Apply the new state to audio engine
-			if (row == 0, {
-				// Oscillator row
-				~applyOscState.();
-			}, {
-				if (row <= 2, {
-					// Octave rows
-					~applyOscState.();
-				}, {
-					// Effect rows 3-7
-					~applyEffectState.(row);
-				})
-			});
-
-			// ── Start hold timer for parameter-edit mode ─────────────
-			if (~fxPadState[row][col] == \active, {
-				var holdCol = col;
-				var holdRow = row;
-				~fxHoldRoutine = Routine {
-					2.0.wait;  // 2-second hold threshold
-					// Only enter edit mode if pad is still active and being held
-					if (~fxPadState[holdRow][holdCol] == \active, {
-						~fxPadState[holdRow][holdCol] = \editing;
-						~fxEditingPad = [holdCol, holdRow];
-						~faderMode = \editing;
-						~updateFXPadLED.(holdCol, holdRow);
-						"[APC] Param edit mode for (%, %)".format(holdCol, holdRow).postln;
-					});
-					~fxHoldRoutine = nil;
-				}.play(AppClock);
-			});
+			if (state == \idle, { ~fxPadState[row][col] = \active; });
 		});
+		~updateFXPadLED.(col, row);
+		if (row <= 2, { ~applyOscState.(); }, { ~applyEffectState.(row); });
 	});
 };
 
-// =============================================================================
-// FX PAD RELEASE HANDLER
-// =============================================================================
-// Called on note-off for FX pads — cancels the hold timer if not yet expired.
-
-~onFXPadRelease = { |col, row|
-	if (~fxHoldRoutine.notNil, {
-		~fxHoldRoutine.stop;
-		~fxHoldRoutine = nil;
-	});
-};
+// No-op: parameter-edit via hold removed. Effect params on SMK25 knobs instead.
+~onFXPadRelease = { |col, row| };
 
 // =============================================================================
 // PC PAD PRESS HANDLER
@@ -263,7 +172,7 @@
 
 ~onPCPadPress = { |col, row|
 	var pcIdx = ~pcCellToIndex.(col, row);
-	if ((pcIdx >= 0) and: { pcIdx < 16 }, {
+	if ((pcIdx >= 0) and: { pcIdx < 12 }, {
 
 		// Cancel any ongoing hold timer
 		if (~pcHoldRoutine.notNil, {
@@ -318,7 +227,7 @@
 // Build a snapshot Dictionary from the current ~fxPadState.
 ~buildSnapshot = {
 	var snap = IdentityDictionary.new;
-	8.do { |row|
+	6.do { |row|
 		6.do { |col|
 			snap[(row * 6 + col).asSymbol] = ~fxPadState[row][col];
 		}
@@ -349,7 +258,7 @@
 ~loadPCSnapshot = { |pcIdx|
 	var snap = ~pcSnapshots[pcIdx];
 	if (snap.notNil, {
-		8.do { |row|
+		6.do { |row|
 			6.do { |col|
 				var key = (row * 6 + col).asSymbol;
 				var state = snap[key];
@@ -370,7 +279,7 @@
 		~refreshFXPadLEDs.();
 		~refreshPCPadLEDs.();
 		~applyOscState.();
-		0.to(7).do { |row| if (row > 2, { ~applyEffectState.(row); }); };
+		0.to(5).do { |row| if (row > 2, { ~applyEffectState.(row); }); };
 
 		"[APC] PC pad % loaded".format(pcIdx).postln;
 	}, {
@@ -378,73 +287,21 @@
 	});
 };
 
-// ~pcSnapshots array — loaded from disk or empty
-~pcSnapshots = Array.fill(16, { nil });
+// ~pcSnapshots array — loaded from disk or empty (12 slots)
+~pcSnapshots = Array.fill(12, { nil });
 
 // =============================================================================
-// FADER MODE
+// FADER HANDLER
 // =============================================================================
-// \normal   — faders 0-5 control voice params, faders 6-8 control backtracks
-// \editing  — faders 0-5 control the editing pad's effect params
-~faderMode = \normal;
+// Faders 0-7 control loop track volumes 0-7. Fader 8 (master) = backtrack VS.
 
-// When fader moves in normal mode, update voice parameter.
-// faderIdx: 0-5 = voice params, 6 = VS vol, 7 = click vol, 8 = cue vol
 ~onFaderMove = { |faderIdx, val|
-	// val is 0-127 (raw CC), normalized to 0.0-1.0
 	var norm = val / 127.0;
-
-	if (faderIdx <= 5, {
-		if (~faderMode == \editing and: { ~fxEditingPad.notNil }, {
-			// ── Parameter edit mode ─────────────────────────────────────
-			var col = ~fxEditingPad[0];
-			var row = ~fxEditingPad[1];
-			var fxKey = ~rowToFXKey[row];
-			if (fxKey.notNil, {
-				var paramTable = ~fxParamTable[fxKey];   // defined in synths.scd
-				if (paramTable.notNil and: { faderIdx < paramTable.size }, {
-					var paramEntry = paramTable[faderIdx];
-					var paramKey = paramEntry[0];
-					Ndef(\masterFX).set(paramKey, norm);
-					// "[APC] FX param %=%.2f".format(paramKey, norm).postln;
-				})
-			})
-		}, {
-			// ── Normal mode ─────────────────────────────────────────────
-			var paramKey = ~faderParamMap[faderIdx];
-			if (paramKey.notNil, {
-				var scaledVal = switch(paramKey,
-					\amp,     norm,
-					\cutoff,  norm.linexp(0.0, 1.0, 80.0, 18000.0),
-					\dryWet,  norm,
-					\attack,  norm.linexp(0.0, 1.0, 0.001, 4.0),
-					\sustain, norm,
-					\release, norm.linexp(0.0, 1.0, 0.01, 8.0),
-					norm
-				);
-				~voiceParams[paramKey] = scaledVal;
-				// Apply to both voice pools (SMK25 + APC Notes Mode)
-				if (~lanth0nVoices.notNil, {
-					~lanth0nVoices.do { |synth|
-						if (synth.notNil, { synth.set(paramKey, scaledVal); })
-					}
-				});
-				if (~apcNotesVoices.notNil, {
-					~apcNotesVoices.do { |entry|
-						if (entry[1].notNil, { entry[1].set(paramKey, scaledVal); })
-					}
-				});
-			})
-		})
+	if (faderIdx < 8, {
+		if (~setLoopVolume.notNil, { ~setLoopVolume.(faderIdx, norm); });
 	}, {
-		// ── Backtrack / click / cue volume faders (6-8) ─────────────────
-		// Always active regardless of fader mode.
-		switch(faderIdx,
-			6, { if (~setVSVolume.notNil, { ~setVSVolume.(norm); }); },
-			7, { if (~setClickVolume.notNil, { ~setClickVolume.(norm); }); },
-			8, { if (~setCueVolume.notNil, { ~setCueVolume.(norm); }); }
-		)
-	})
+		if (~setVSVolume.notNil, { ~setVSVolume.(norm); });
+	});
 };
 
 // =============================================================================
@@ -490,27 +347,26 @@
 // ~pcSnapshotsPath is set in main.scd (e.g. <project>/config/pc_snapshots.json)
 
 ~persistPCSnapshots = {
-	// Convert ~pcSnapshots to a JSON-compatible structure and write to disk.
-	// SC doesn't have a built-in JSON writer, so we write a minimal valid JSON.
 	var path = ~pcSnapshotsPath ? (thisProcess.nowExecutingPath.dirname.dirname +/+ "config/pc_snapshots.json");
 	var lines = List.new;
 	lines.add("{");
 	lines.add("  \"snapshots\": [");
 	~pcSnapshots.do { |snap, i|
 		if (snap.isNil, {
-			lines.add(if(i < 15, "    null,", "    null"));
+			lines.add(if(i < 11, "    null,", "    null"));
 		}, {
 			var rows = List.new;
 			rows.add("    {");
-			8.do { |row|
+			6.do { |row|
 				6.do { |col|
 					var key = (row * 6 + col).asSymbol;
 					var state = snap[key] ? \off;
+					var isLast = (row == 5) and: { col == 5 };
 					rows.add("      \"r%c%\": \"%\"".format(row, col,
-						state.asString) ++ if(row < 7 or: { col < 5 }, ",", ""));
+						state.asString) ++ if(isLast, "", ","));
 				}
 			};
-			rows.add(if(i < 15, "    },", "    }"));
+			rows.add(if(i < 11, "    },", "    }"));
 			rows.do { |l| lines.add(l); };
 		})
 	};
@@ -532,11 +388,11 @@
 			data = Json.parse(path);
 			var snapshots = data[\snapshots] ? [];
 			snapshots.do { |snap, i|
-				if (snap.notNil and: { i < 16 }, {
-					// Rebuild the snapshot in IdentityDictionary format
-					var snapDict = IdentityDictionary.new;
-					8.do { |row|
-						6.do { |col|
+			if (snap.notNil and: { i < 12 }, {
+				// Rebuild the snapshot in IdentityDictionary format
+				var snapDict = IdentityDictionary.new;
+				6.do { |row|
+					6.do { |col|
 							var key = (row * 6 + col).asSymbol;
 							var stateKey = ("r" ++ row ++ "c" ++ col).asSymbol;
 							var state = snap[stateKey];
@@ -562,13 +418,12 @@
 
 ~initAPCPads = {
 	~initFXPadState.();
-	~pcSnapshots = Array.fill(16, { nil });
-	~pcPadState  = Array.fill(16, { \empty });
+	~pcSnapshots   = Array.fill(12, { nil });
+	~pcPadState    = Array.fill(12, { \empty });
 	~activePCIndex = nil;
-	~fxEditingPad = nil;
-	~faderMode = \normal;
-	~apcNotesMode = false;
+	~apcNotesMode  = false;
 	~loadPCSnapshotsFromDisk.();
 	~refreshAllLEDs.();
+	~initMetronomeRow.();   // dim-yellow until loops.scd starts the metronome
 	"APC pad state machine initialized.".postln;
 };

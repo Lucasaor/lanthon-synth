@@ -1,413 +1,353 @@
 // =============================================================================
-// DEPRECATED — loops.scd is superseded by apc_pads.scd in LANTH0N 5YNTH.
-// This file is kept for reference only and is NOT loaded by main.scd.
-// The Ndef-based loop architecture has been replaced by the APC Mini FX pad
-// state machine. See src/apc_pads.scd for the new architecture.
+// loops.scd — LANTH0N 5YNTH: Metronome row + 8-track loop recording engine
 // =============================================================================
-// Step 5 — Loop Tracks (Ndef-based) + APC Mini Grid Control [ARCHIVED]
-// =============================================================================
-// Each of the 8 APC Mini columns maps to one independent loop track backed
-// by an Ndef.  The grid buttons control record/play/stop/mute/clear per
-// track.  This file exposes functions that midi_routing.scd calls.
+// Drives Row 8 (index 7, top) and Row 7 (index 6) of the APC Mini v2.
 //
-// APC Mini 8×8 Grid Layout (columns = tracks 0-7, rows bottom→top):
+// Row 7 (APC index 7) — Metronome / loop-length selector
+//   Dim yellow background. A single light-blue "rolling pad" advances left-to-right,
+//   one step per beat. Pressing pad N sets loop length to N bars (1–8).
 //
-//   Row 7 (top)    [ CLEAR ]  — clear/erase loop
-//   Row 6          [ unused ]
-//   Row 5          [ unused ]
-//   Row 4          [ unused ]
-//   Row 3          [ MUTE  ]  — toggle mute
-//   Row 2          [ PLAY  ]  — toggle play/stop
-//   Row 1          [ REC   ]  — toggle record/overdub
-//   Row 0 (bottom) [ STOP  ]  — stop (same as PLAY row, secondary trigger)
+// Row 6 (APC index 6) — Loop track controls (tracks 0–7 = faders 1–8)
+//   Pad states: \empty (off) → \waiting (amber) → \recording (red) → \playing (green)
+//              \playing (green) → \paused (yellow) → \playing (green)
+//   Hold 2 s on a recorded pad → overdub (re-record on next downbeat).
 //
-//   Col:  0   1   2   3   4   5   6   7
-//         ↓   ↓   ↓   ↓   ↓   ↓   ↓   ↓
-//       Loop1 Loop2 Loop3 Loop4 Loop5 Loop6 Loop7 Loop8
-//
-// NOTE: The APC Mini note numbers for the grid are determined by calibration.
-// The mapping from (col, row) → MIDI note is stored in ~apcGridMap (set by
-// the calibration data).  Default assumption: note = row * 8 + col (bottom-left
-// is note 0), but this MUST be verified against the real controller.
-//
-// LED colour codes for the APC Mini (sent as note-on velocity):
-//   velocity 0  = LED off
-//   velocity 1  = green
-//   velocity 3  = yellow / amber
-//   velocity 5  = red
-//   (See apc_leds.scd for the full palette and the send function.)
-
-// =============================================================================
-// GLOBALS
+// All loop boundaries are quantized to bar-set downbeats via TempoClock.
+// Faders 0–7 (set in apc_pads.scd / midi_routing.scd) call ~setLoopVolume.
 // =============================================================================
 
-~numLoops     = 8;                        // one per APC Mini column
-~loopBufs     = Array.fill(~numLoops, { nil });  // Buffer per loop
-~loopNdefs    = Array.fill(~numLoops, { nil });  // Ndef per loop
-~loopStates   = Array.fill(~numLoops, { \empty }); // state atom per loop
-~loopRecSynths = Array.fill(~numLoops, { nil });   // recorder Synth per loop
-~loopDuration = 16;                       // max loop length in seconds
-~loopInputBus = 0;                        // bus to record from (main input)
+// =============================================================================
+// CONSTANTS
+// =============================================================================
 
-// -----------------------------------------------------------------------
-// APC Mini grid → (col, row) mapping
-// -----------------------------------------------------------------------
-// Populate from CONTROLS.md calibration data.  The default below assumes
-// note numbers start at 0 with col-major layout (row*8 + col).
-// Override after running the calibration tool.
-
-~apcGridNoteBase = 0;  // MIDI note number of bottom-left grid button
-
-// Convert (col, row) → expected MIDI note (col-major, bottom-left origin)
-~apcNoteForCell = { |col, row|
-	// Default: row 0 = bottom row of grid, col 0 = leftmost column
-	~apcGridNoteBase + (row * 8) + col;
-};
-
-// Reverse: given a MIDI note, return [col, row] or nil if out of range
-~apcCellForNote = { |note|
-	var n = note - ~apcGridNoteBase;
-	if (n >= 0 and: { n < 64 }, {
-		[n % 8, (n / 8).asInteger];  // [col, row]
-	}, { nil });
-};
+~loopBeatsPerBar = 4;     // 4/4 time
+~loopLength      = 2;     // initial loop length in bars (1–8)
+~loopNumTracks   = 8;
 
 // =============================================================================
-// LOOPER SYNTHDEF
+// STATE ARRAYS
 // =============================================================================
-// A single SynthDef handles all looper states via control parameters.
-// It uses PlayBuf for playback and RecordBuf for recording, both operating
-// on the same mono Buffer.  State transitions are managed externally by
-// setting `playGate` and `recGate`.
 
-SynthDef(\looper, {
-	arg out = 0,
-	buf = 0,            // buffer number
-	inputBus = 0,       // audio bus to capture
-	playGate = 0,       // 1 = playing, 0 = stopped
-	recGate  = 0,       // 1 = recording, 0 = not recording
-	preLevel = 1.0,     // pre-fader level (for the recorded signal)
-	amp      = 1.0,     // output level (controlled by fader)
-	pan      = 0.0;
+~loopState     = Array.fill(~loopNumTracks, { \empty });
+~loopBufs      = Array.fill(~loopNumTracks, { nil });
+~loopRecSynth  = Array.fill(~loopNumTracks, { nil });
+~loopPlaySynth = Array.fill(~loopNumTracks, { nil });
+~loopAmps      = Array.fill(~loopNumTracks, { 0.8 });
 
-	var input, playback, recSig, sig, hasContent;
+// Hold-timer state for overdub detection
+~loopHoldRoutine = nil;
+~loopHoldTrack   = nil;
 
-	// Capture the input bus (mono)
-	input = In.ar(inputBus, 1);
+// =============================================================================
+// SYNTHDEFS
+// =============================================================================
+// \loopRec  : captures ~synthSendBus into a pre-allocated Buffer (stereo).
+// \loopPlay : loops a stereo Buffer indefinitely with volume control.
 
-	// PlayBuf is always running — when playGate is 0 we silence its output.
-	// loop:1 means it wraps around automatically.
-	playback = PlayBuf.ar(1, buf, loop: 1);
+SynthDef(\loopRec, {
+	arg buf=0, inputBus=4, amp=1.0;
+	var sig = In.ar(inputBus, 2);
+	// loop:0 stops when the buffer is full; we free this synth externally.
+	RecordBuf.ar(sig * amp, buf, loop: 0, trigger: 1, doneAction: Done.none);
+}).add;
 
-	// RecordBuf writes to the buffer.  recGate acts as the record-enable.
-	// preLevel controls the input level hitting the buffer.
-	// loop:1 means it wraps and overwrites.
-	RecordBuf.ar(input * preLevel, buf, recLevel: recGate, loop: 1);
-
-	// Output routing:
-	//   recGate=0, playGate=0 → silence
-	//   recGate=0, playGate=1 → playback only
-	//   recGate=1, playGate=0 → input monitoring (recording, not playing)
-	//   recGate=1, playGate=1 → input + playback (overdub)
-	sig = Select.ar(recGate, [
-		playback * playGate,                // not recording
-		(input * preLevel) + (playback * playGate)  // recording (or overdub)
-	]);
-
-	// Detect if buffer has content (for LED feedback)
-	// We use a simple amplitude check on the playback
-	hasContent = Amplitude.kr(playback, 0.1, 0.1) > 0.0001;
-	SendReply.kr(Impulse.kr(4), '/loopHasContent', hasContent);
-
-	sig = sig * amp;
-	Out.ar(out, Pan2.ar(sig, pan));
+SynthDef(\loopPlay, {
+	arg out=0, buf=0, amp=1.0, rate=1.0;
+	var sig = PlayBuf.ar(2, buf, rate * BufRateScale.kr(buf), loop: 1, doneAction: Done.none);
+	Out.ar(out, sig * amp.lag(0.05));
 }).add;
 
 // =============================================================================
-// LOOP STATE MACHINE
+// BUFFER ALLOCATION
 // =============================================================================
-// States: \empty, \recording, \playing, \overdubbing, \stopped, \muted
-//
-// Transitions (triggered by APC grid button presses):
-//
-//   Row 1 (REC):
-//     empty      → recording     (start recording)
-//     playing    → overdubbing   (start overdub)
-//     recording  → playing       (stop recording, start playback)
-//     overdubbing→ playing       (stop overdub, continue playback)
-//     stopped    → recording     (overwrite)
-//
-//   Row 2 (PLAY):
-//     playing    → stopped       (stop playback)
-//     stopped    → playing       (resume playback)
-//     empty      → (no-op)
-//     recording  → (no-op, use REC to stop recording)
-//
-//   Row 3 (MUTE):
-//     playing    → muted
-//     muted      → playing
-//     recording  → muted (continue recording silently)
-//     muted (was recording) → recording
-//
-//   Row 7 (CLEAR):
-//     any state  → empty         (clear buffer, free Ndef)
-//
-//   Row 0 (STOP): same as PLAY row
 
-// ----- State query helpers -----
-~loopIsEmpty   = { |i| ~loopStates[i] == \empty };
-~loopIsPlaying = { |i| ~loopStates[i] == \playing };
-~loopIsRecording = { |i| ~loopStates[i] == \recording };
-~loopIsOverdubbing = { |i| ~loopStates[i] == \overdubbing };
-~loopIsStopped = { |i| ~loopStates[i] == \stopped };
-~loopIsMuted   = { |i| ~loopStates[i] == \muted };
-~loopHasContent = { |i|
-	// A loop has content if its state is not \empty
-	~loopStates[i] != \empty;
-};
-
-// ----- Core transition actions -----
-
-~loopStartRecording = { |i|
-	var buf = ~loopBufs[i];
-	var ndef;
-	if (buf.isNil, {
-		"Loop %: no buffer allocated — cannot record".format(i).warn;
+~allocLoopBuf = { |track|
+	// Size the buffer to hold exactly one bar set at the current tempo.
+	var clock = TempoClock.default;
+	var durationSecs = ~loopLength * ~loopBeatsPerBar / clock.tempo;
+	var numFrames = (durationSecs * s.sampleRate).ceil.asInteger.max(1);
+	if (~loopBufs[track].notNil, {
+		~loopBufs[track].free;
+		~loopBufs[track] = nil;
 	});
-	// Create or reuse Ndef
-	ndef = ~loopNdefs[i];
-	if (ndef.isNil, {
-		ndef = Ndef(("loop" ++ i).asSymbol);
-		~loopNdefs[i] = ndef;
-	});
-	// Configure Ndef to use the looper SynthDef
-	ndef.source = \looper;
-	ndef.set(\buf, buf.bufnum);
-	ndef.set(\inputBus, ~loopInputBus);
-	ndef.set(\recGate, 1);   // recording ON
-	ndef.set(\playGate, 0);  // playback OFF (monitoring only)
-	ndef.set(\preLevel, 1.0);
-	ndef.set(\amp, 1.0);
-	ndef.play;
-
-	~loopStates[i] = \recording;
-	"Loop % → RECORDING".format(i).postln;
-	~updateAPCled(i);    // defined in apc_leds.scd
-};
-
-~loopStopRecording = { |i|
-	var ndef = ~loopNdefs[i];
-	if (ndef.notNil, {
-		ndef.set(\recGate, 0);   // recording OFF
-		ndef.set(\playGate, 1);  // playback ON
-		~loopStates[i] = \playing;
-		"Loop % → PLAYING".format(i).postln;
-		~updateAPCled(i);
+	// Allocate synchronously using AppClock; audio thread is not blocked.
+	~loopBufs[track] = Buffer.alloc(s, numFrames, 2, action: { |b|
+		"[LOOP] Track % buffer: % frames (%.1f s)".format(
+			track, b.numFrames, b.numFrames / s.sampleRate).postln;
 	});
 };
 
-~loopStartOverdub = { |i|
-	var ndef = ~loopNdefs[i];
-	if (ndef.notNil, {
-		ndef.set(\recGate, 1);   // recording ON
-		ndef.set(\playGate, 1);  // playback ON
-		~loopStates[i] = \overdubbing;
-		"Loop % → OVERDUBBING".format(i).postln;
-		~updateAPCled(i);
-	});
+// =============================================================================
+// METRONOME ROW (row 7)
+// =============================================================================
+
+~metroRoutine = nil;
+~metroBeat    = 0;   // current beat index within the bar set (0-based)
+
+~startMetronome = {
+	if (~metroRoutine.notNil, { ~metroRoutine.stop; ~metroRoutine = nil; });
+
+	~metroRoutine = Routine {
+		var beat = 0;
+		loop {
+			var totalBeats = ~loopLength * ~loopBeatsPerBar;
+			var beatInSet  = beat % totalBeats;
+			~metroBeat = beatInSet;
+
+			// Map beat position to column 0-7 over the current loop length.
+			// The "last active" column is (~loopLength - 1) to stay within
+			// the 8 available pads regardless of loop length.
+			var maxCol   = (~loopLength - 1).clip(0, 7);
+			var rollCol  = beatInSet.linlin(0, totalBeats - 1, 0, maxCol).round.asInteger;
+			~updateMetronomeRow.(rollCol, beatInSet == 0);
+
+			beat = beat + 1;
+			1.0.wait;   // 1 beat; TempoClock scales by tempo
+		}
+	}.play(TempoClock.default);
 };
 
-~loopStopOverdub = { |i|
-	var ndef = ~loopNdefs[i];
-	if (ndef.notNil, {
-		ndef.set(\recGate, 0);   // recording OFF
-		ndef.set(\playGate, 1);  // playback ON
-		~loopStates[i] = \playing;
-		"Loop % → PLAYING (overdub done)".format(i).postln;
-		~updateAPCled(i);
-	});
+~stopMetronome = {
+	if (~metroRoutine.notNil, { ~metroRoutine.stop; ~metroRoutine = nil; });
 };
 
-~loopTogglePlay = { |i|
-	var ndef = ~loopNdefs[i];
-	if (~loopIsEmpty.(i), {
-		"Loop %: empty — nothing to play".format(i).postln;
-	});
-	if (~loopIsPlaying.(i) or: { ~loopIsOverdubbing.(i) }, {
-		// Stop playback
-		if (ndef.notNil, {
-			ndef.set(\playGate, 0);
-			ndef.set(\recGate, 0);
-		});
-		~loopStates[i] = \stopped;
-		"Loop % → STOPPED".format(i).postln;
-		~updateAPCled(i);
-	}, {
-		// Start playback
-		if (~loopIsStopped.(i) or: { ~loopIsMuted.(i) }, {
-			if (ndef.notNil, {
-				ndef.set(\playGate, 1);
+// Update the metronome row LEDs (row 7, APC index 7).
+~updateMetronomeRow = { |rollingCol, isDownbeat|
+	if (~apcSendLED.notNil, {
+		8.do { |col|
+			var vel;
+			if (col == rollingCol, {
+				vel = if (isDownbeat, { ~ledCyan ? 53 }, { ~ledLightBlue ? 49 });
+			}, {
+				vel = ~ledDimYellow ? 9;
 			});
-			~loopStates[i] = \playing;
-			"Loop % → PLAYING".format(i).postln;
-			~updateAPCled(i);
-		});
+			~apcSendLED.(col, 7, vel);
+		}
 	});
 };
 
-~loopToggleMute = { |i|
-	var ndef = ~loopNdefs[i];
-	var prevState;
-	if (~loopIsEmpty.(i), {
-		"Loop %: empty — nothing to mute".format(i).postln;
-	});
-	if (~loopIsMuted.(i), {
-		// Unmute: restore previous state
-		prevState = ~loopMutePrev[i] ? \playing;
-		if (ndef.notNil, { ndef.set(\amp, 1.0); });
-		~loopStates[i] = prevState;
-		"Loop % → UNMUTED (was %)".format(i, prevState).postln;
-	}, {
-		// Mute: store current state and silence
-		~loopMutePrev = ~loopMutePrev ? Array.fill(~numLoops, { \playing });
-		~loopMutePrev[i] = ~loopStates[i];
-		if (ndef.notNil, { ndef.set(\amp, 0.0); });
-		~loopStates[i] = \muted;
-		"Loop % → MUTED".format(i).postln;
-	});
-	~updateAPCled(i);
-};
+// Called when user presses a metronome-row pad (from midi_routing.scd).
+~onMetronomePadPress = { |col, row|
+	// Pad index (0-7) → loop length (1-8 bars)
+	var newLen = col + 1;
+	var oldLen = ~loopLength;
+	~loopLength = newLen;
+	"[LOOP] Loop length set to % bar(s)".format(newLen).postln;
 
-~loopClear = { |i|
-	var ndef = ~loopNdefs[i];
-	var buf = ~loopBufs[i];
-	// Stop and free the Ndef
-	if (ndef.notNil, {
-		ndef.stop;
-		ndef.clear;
-		~loopNdefs[i] = nil;
-	});
-	// Zero out the buffer (write silence)
-	if (buf.notNil, {
-		buf.zero;
-	});
-	~loopStates[i] = \empty;
-	"Loop % → EMPTY (cleared)".format(i).postln;
-	~updateAPCled(i);
+	// Restart metronome to reflect new length
+	~startMetronome.();
+	// Note: running loop buffers keep their existing content.
+	// Length increase: extra bars at end will play silence until re-recorded.
+	// Length decrease: playback wraps at the shorter buffer boundary.
 };
 
 // =============================================================================
-// APC GRID BUTTON HANDLER (called from midi_routing.scd)
+// LOOP TRACK ROW (row 6)
 // =============================================================================
-// This is the main dispatch function.  midi_routing.scd calls this when a
-// grid note-on is received from the APC Mini.
 
-~apcGridPress = { |note, vel|
-	var cell = ~apcCellForNote.(note);
-	var col, row;
-	if (cell.isNil, {
-		"APC grid: note % out of range — ignoring".format(note).postln;
-	});
-	col = cell[0];
-	row = cell[1];
+// Dispatch a loop track pad press (called by midi_routing.scd).
+~onLoopPadPress = { |col, row|
+	var track = col;   // col 0-7 → tracks 0-7
+	var state = ~loopState[track];
+	"[LOOP] Pad press track=% state=%".format(track, state).postln;
 
-	// Only respond to note-on with velocity > 0 (ignore note-off)
-	if (vel == 0, {
-		// Note-off: ignore for latching behavior
-	});
-
-	("APC grid press: col=" ++ col ++ ", row=" ++ row ++ ", vel=" ++ vel).postln;
-
-	switch (row,
-		0, { ~loopTogglePlay.(col); },    // STOP row (same as PLAY)
-		1, {                               // REC row
-			switch (~loopStates[col],
-				\empty,        { ~loopStartRecording.(col); },
-				\playing,      { ~loopStartOverdub.(col); },
-				\recording,    { ~loopStopRecording.(col); },
-				\overdubbing,  { ~loopStopOverdub.(col); },
-				\stopped,      { ~loopStartRecording.(col); },
-				\muted,        { "Loop %: unmute before recording".format(col).postln; }
-			);
+	switch(state,
+		\empty, {
+			// Schedule recording at next bar-set downbeat
+			~scheduleLoopRecord.(track);
 		},
-		2, { ~loopTogglePlay.(col); },     // PLAY row
-		3, { ~loopToggleMute.(col); },     // MUTE row
-		7, { ~loopClear.(col); },          // CLEAR row (top)
-		{ "APC grid row %: no action assigned".format(row).postln; }
+		\playing, {
+			// Pause playback, keep recording
+			~stopLoopPlayback.(track);
+			~loopState[track] = \paused;
+			~updateLoopTrackLED.(track);
+		},
+		\paused, {
+			// Resume playback
+			~startLoopPlayback.(track);
+			~loopState[track] = \playing;
+			~updateLoopTrackLED.(track);
+		}
+		// \waiting and \recording presses are ignored (let the cycle finish)
 	);
+
+	// Start hold timer for overdub (only if track has content)
+	if (~loopHoldRoutine.notNil, { ~loopHoldRoutine.stop; ~loopHoldRoutine = nil; });
+	if ((state == \playing) or: { state == \paused }, {
+		var holdTrack = track;
+		~loopHoldTrack = holdTrack;
+		~loopHoldRoutine = Routine {
+			2.0.wait;
+			"[LOOP] Overdub requested for track=%".format(holdTrack).postln;
+			~scheduleLoopOverdub.(holdTrack);
+			~loopHoldRoutine = nil;
+		}.play(AppClock);
+	});
+};
+
+// Cancel hold timer on note-off.
+~onLoopPadRelease = { |col, row|
+	if (~loopHoldRoutine.notNil, {
+		~loopHoldRoutine.stop;
+		~loopHoldRoutine = nil;
+	});
+	~loopHoldTrack = nil;
+};
+
+// Update a single loop track LED (row 6, col = track index).
+~updateLoopTrackLED = { |track|
+	if (~apcSendLED.notNil and: { ~loopState.notNil }, {
+		var state = ~loopState[track];
+		var vel = switch(state,
+			\empty,     ~ledOff      ? 0,
+			\waiting,   ~ledAmber    ? 17,
+			\recording, ~ledRed      ? 5,
+			\playing,   ~ledGreen    ? 3,
+			\paused,    ~ledYellow   ? 13,
+			/* default */ 0
+		);
+		~apcSendLED.(track, 6, vel);
+	});
+};
+
+~refreshLoopTrackLEDs = {
+	~loopNumTracks.do { |i| ~updateLoopTrackLED.(i); };
 };
 
 // =============================================================================
-// INITIALIZATION
+// RECORD / PLAYBACK ENGINE
 // =============================================================================
-// Called from main.scd after server boot and MIDI init.
+
+// Schedule a new recording to start at the next bar-set downbeat.
+~scheduleLoopRecord = { |track|
+	~loopState[track] = \waiting;
+	~updateLoopTrackLED.(track);
+	~stopLoopPlayback.(track);   // stop any existing playback
+	~allocLoopBuf.(track);       // allocate fresh buffer
+
+	var clock      = TempoClock.default;
+	var totalBeats = ~loopLength * ~loopBeatsPerBar;
+	var curBeat    = clock.beats;
+	var beatInSet  = curBeat % totalBeats;
+	// Beats until the next bar-set downbeat (never 0 to avoid edge case)
+	var toNext     = if (beatInSet < 0.001, { totalBeats }, { totalBeats - beatInSet });
+	var startBeat  = curBeat + toNext;
+	var endBeat    = startBeat + totalBeats;
+
+	"[LOOP] Track % waiting for downbeat in %.2f beats".format(track, toNext).postln;
+
+	// Start recording at downbeat
+	clock.schedAbs(startBeat, {
+		if (~loopState[track] == \waiting, {
+			~loopState[track] = \recording;
+			~updateLoopTrackLED.(track);
+			~startLoopRecording.(track);
+		});
+		nil
+	});
+
+	// End recording one bar set later → start playback
+	clock.schedAbs(endBeat, {
+		if (~loopState[track] == \recording, {
+			~stopLoopRecording.(track);
+			~loopState[track] = \playing;
+			~updateLoopTrackLED.(track);
+			Routine {
+				// Tiny wait for RecordBuf to flush
+				0.05.wait;
+				~startLoopPlayback.(track);
+			}.play(AppClock);
+			"[LOOP] Track % recording complete → playing".format(track).postln;
+		});
+		nil
+	});
+};
+
+// Schedule an overdub: same as record but doesn't stop existing playback first.
+~scheduleLoopOverdub = { |track|
+	~stopLoopPlayback.(track);
+	~loopState[track] = \empty;   // reset so scheduleLoopRecord re-allocates
+	~scheduleLoopRecord.(track);
+};
+
+~startLoopRecording = { |track|
+	var buf = ~loopBufs[track];
+	if (buf.isNil, { "[LOOP] ERROR: no buffer for track=%".format(track).postln; ^nil });
+	if (~loopRecSynth[track].notNil, { ~loopRecSynth[track].free; ~loopRecSynth[track] = nil; });
+	~loopRecSynth[track] = Synth.after(s, \loopRec, [
+		\buf,      buf.bufnum,
+		\inputBus, ~synthSendBus.index
+	]);
+	"[LOOP] Track % recording started".format(track).postln;
+};
+
+~stopLoopRecording = { |track|
+	if (~loopRecSynth[track].notNil, {
+		~loopRecSynth[track].free;
+		~loopRecSynth[track] = nil;
+	});
+};
+
+~startLoopPlayback = { |track|
+	var buf = ~loopBufs[track];
+	if (buf.isNil, { ^nil });
+	if (~loopPlaySynth[track].notNil, { ~loopPlaySynth[track].free; ~loopPlaySynth[track] = nil; });
+	~loopPlaySynth[track] = Synth(\loopPlay, [
+		\out, ~mainOutBus,
+		\buf, buf.bufnum,
+		\amp, ~loopAmps[track]
+	]);
+};
+
+~stopLoopPlayback = { |track|
+	if (~loopPlaySynth[track].notNil, {
+		~loopPlaySynth[track].free;
+		~loopPlaySynth[track] = nil;
+	});
+};
+
+// Called by fader moves (fader 0-7 → track 0-7 volume).
+~setLoopVolume = { |track, amp|
+	~loopAmps[track] = amp;
+	if (~loopPlaySynth[track].notNil, {
+		~loopPlaySynth[track].set(\amp, amp);
+	});
+};
+
+// =============================================================================
+// STOP ALL LOOPS (for panic stop)
+// =============================================================================
+
+~stopAllLoops = {
+	~loopNumTracks.do { |track|
+		~stopLoopRecording.(track);
+		~stopLoopPlayback.(track);
+		~loopState[track] = \empty;
+		if (~loopBufs[track].notNil, {
+			~loopBufs[track].free;
+			~loopBufs[track] = nil;
+		});
+	};
+	~refreshLoopTrackLEDs.();
+};
+
+// =============================================================================
+// INIT
+// =============================================================================
 
 ~initLoops = {
-	var server = s;
+	~loopState     = Array.fill(~loopNumTracks, { \empty });
+	~loopBufs      = Array.fill(~loopNumTracks, { nil });
+	~loopRecSynth  = Array.fill(~loopNumTracks, { nil });
+	~loopPlaySynth = Array.fill(~loopNumTracks, { nil });
+	~loopAmps      = Array.fill(~loopNumTracks, { 0.8 });
+	~loopHoldRoutine = nil;
+	~loopHoldTrack   = nil;
 
-	"Allocating loop buffers (% × %s mono)...".format(~numLoops, ~loopDuration).postln;
-
-	~numLoops.do { |i|
-		var buf;
-		// Allocate mono buffer: duration * sampleRate frames
-		buf = Buffer.alloc(server, ~loopDuration * server.sampleRate, 1, {
-			("Loop % buffer ready (% frames)".format(
-				i, ~loopDuration * server.sampleRate
-			)).postln;
-		});
-		~loopBufs[i] = buf;
-	};
-
-	// Initialize mute-previous-state array
-	~loopMutePrev = Array.fill(~numLoops, { \playing });
-
-	"Loop subsystem initialized.".postln;
+	~refreshLoopTrackLEDs.();
+	~startMetronome.();
+	"[LOOP] Loop engine initialized. Length=% bar(s), tempo=% bps".format(
+		~loopLength, TempoClock.default.tempo.round(0.01)).postln;
 };
 
 // =============================================================================
-// CLEANUP (for graceful shutdown)
-// =============================================================================
-
-~freeLoops = {
-	~numLoops.do { |i|
-		var ndef = ~loopNdefs[i];
-		if (ndef.notNil, { ndef.stop; ndef.clear; });
-		var buf = ~loopBufs[i];
-		if (buf.notNil, { buf.free; });
-	};
-	~loopNdefs = Array.fill(~numLoops, { nil });
-	~loopBufs  = Array.fill(~numLoops, { nil });
-	~loopStates = Array.fill(~numLoops, { \empty });
-	"Loop subsystem freed.".postln;
-};
-
-// =============================================================================
-// VERIFICATION (Step 5 checkpoint)
-// =============================================================================
-// After loading loops.scd, synths.scd, apc_leds.scd, and midi_routing.scd,
-// exercise the following sequence manually or via simulated MIDI:
-//
-//   1. Simulate pressing REC on column 0:
-//        ~apcGridPress.(~apcNoteForCell.(0, 1), 127);
-//      → Expect: "Loop 0 → RECORDING"
-//
-//   2. Simulate pressing REC again:
-//        ~apcGridPress.(~apcNoteForCell.(0, 1), 127);
-//      → Expect: "Loop 0 → PLAYING"
-//
-//   3. Simulate pressing MUTE:
-//        ~apcGridPress.(~apcNoteForCell.(0, 3), 127);
-//      → Expect: "Loop 0 → MUTED"
-//
-//   4. Simulate pressing MUTE again:
-//        ~apcGridPress.(~apcNoteForCell.(0, 3), 127);
-//      → Expect: "Loop 0 → UNMUTED (was playing)"
-//
-//   5. Simulate pressing CLEAR:
-//        ~apcGridPress.(~apcNoteForCell.(0, 7), 127);
-//      → Expect: "Loop 0 → EMPTY (cleared)"
-//
-//   6. Repeat on column 1 and confirm no cross-talk.
-//
-// Check state after each:
-//   ~loopStates.postln;

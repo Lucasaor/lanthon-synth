@@ -10,7 +10,7 @@ You are implementing **LANTH0N 5YNTH**: a headless, real-time performance instru
 
 - **Raspberry Pi Zero 2W** — quad-core Cortex-A53 @ 1GHz, 512MB RAM, single micro-USB OTG port (shared via powered USB hub for all peripherals), headless (no display attached during normal operation).
 - **SSD1306 OLED Display** — 0.96″ blue/yellow I2C display (128×64 px), connected via I2C bus. Used exclusively to show backtrack/setlist state (current setlist name, song name, artist, and playback state). Driven from a small Python daemon (using `luma.oled` or equivalent) that subscribes to OSC or a Unix socket from sclang.
-- **AKAI APC Mini** — 8x8 RGB-LED grid (64 pads) + 9 vertical faders + top/side control row. The grid is split into **FX Control pads** (columns 1–6, 48 pads) and **Program Change pads** (columns 7–8, 16 pads). Faders control synth/backtrack parameters. The APC Mini also has a **Notes Mode** in which the grid plays MIDI notes directly instead of triggering pad functions — the system must gracefully handle mode transitions.
+- **AKAI APC Mini v2** — 8×8 RGB-LED grid (64 pads) + 8 column faders + 1 master fader (9 faders total). The grid is organized as: **Row 8 (top)** = Metronome / loop-length selector (8 pads), **Row 7** = Loop track controls (8 independent loop tracks), **Rows 1–6 / Columns 1–6** = FX Control pads (36 pads), **Rows 1–6 / Columns 7–8** = Program Change pads (12 pads). Faders 1–8 control individual loop track volumes; fader 9 (master) controls the backtrack (VS) volume. The APC Mini v2 also has a **Notes Mode** (Shift + Notes on the hardware) in which the grid sends MIDI notes directly instead of pad-function messages — the system must gracefully handle mode transitions.
 - **Worlde Easypad 12** — 12 pads. Each pad triggers a **sample** with velocity sensitivity and configurable ADSR envelopes. Sample assignments are configured via the web interface.
 - **M-VAVE SMK 25** — 25-key MIDI keyboard connected via **Bluetooth MIDI** (not USB). Used as the melodic voice/lead input.
 - **USB audio interface** — class-compliant, assumed to expose at least **4 output channels**: channels 1–2 = FOH (main mix), channels 3–4 = IEM (monitor mix). Backtracks and synth go to FOH; click and cue (Dica) tracks go to IEM only. Exact channel assignment is configurable via the web interface.
@@ -32,9 +32,10 @@ You are implementing **LANTH0N 5YNTH**: a headless, real-time performance instru
 
 ### Audio engine (SuperCollider)
 - **Oscillator/SynthDef library**: six selectable waveforms (square, saw, supersaw, sine, TB-303 style, WhiteNoise), each implemented as a cheap `SynthDef`. Per-waveform octave-up and octave-down doublers are additive layers, not separate synths — they are mixed internally when active.
-- **Effect chain** (shared buses, not per-voice): Distortion → Envelope shaper → Reverb → LPF → HPF. Each stage is an `Ndef` or `Bus`-routed `SynthDef` that can be toggled on/off.
-- **Percussion/sample engine**: Worlde Easypad 12 triggers one-shot `Buffer`-backed sample playback synths, with per-pad velocity scaling and ADSR parameters loaded from the config file.
-- **SMK25 (Bluetooth)**: note-on/off drives the active oscillator stack (whichever waveform pads are currently "on" in the APC Mini FX grid). Pitch and velocity route through the full effect chain.
+- **Effect chain** (shared buses, not per-voice): Distortion → Delay → Reverb → LPF → HPF. Each stage is an `Ndef` or `Bus`-routed `SynthDef` that can be toggled on/off. Effect parameters (reverb room size, delay time/frequency, LPF/HPF cutoff, drive, etc.) are controlled exclusively via SMK25 knobs — not via faders.
+- **Loop recording engine**: up to 8 independent loop tracks, each corresponding to one pad in Row 7 of the APC Mini. Loops record in real time from the synth/sample output bus, quantized to bar-set boundaries driven by the shared `TempoClock`. (`src/loops.scd`)
+- **Percussion/sample engine**: Worlde Easypad 12 pads and SMK25 pads both trigger one-shot `Buffer`-backed sample playback synths, with per-pad velocity scaling and ADSR parameters loaded from the config file.
+- **SMK25 (Bluetooth)**: note-on/off drives the active oscillator stack (whichever Row 1 waveform pads are active). Pitch Wheel = pitch bend; Mod Wheel (CC 1) = filter cutoff. Knobs map to LPF, HPF, global ADSR, tempo, FX mix, and per-effect parameters — all assignments configurable via web interface MIDI-learn.
 
 ### Backtrack player
 - A separate `sclang` routine (or a lightweight Python process communicating via OSC) handles streaming playback of MP3 files from disk using `DiskIn` / `VDiskIn` UGens (or equivalent disk-streaming approach).
@@ -43,61 +44,70 @@ You are implementing **LANTH0N 5YNTH**: a headless, real-time performance instru
 - **Output routing** is configurable: VS → FOH bus, click/Dica → IEM bus. Routing table is stored in the config file and editable via the web interface.
 - **Playback MIDI mapping**: play, stop, next song, and previous song are assignable to any note/CC on any controller, configured via the web interface.
 
-### AKAI APC Mini grid layout
+### AKAI APC Mini v2 grid layout
 
 The 8×8 grid is addressed row 1 (bottom) to row 8 (top), column 1 (left) to column 8 (right).
 
-**Columns 1–6 — FX Control pads (48 pads total):**
-Each row in columns 1–6 maps to one FX/oscillator function. Within a row, up to 6 independent instances or variants can be active simultaneously (e.g., multiple oscillator waveforms, multiple distortion flavors — exact per-pad assignment is configured via the web interface).
+**Row 8 (top) — Metronome / Loop-length selector (8 pads):**
+- The entire row displays dim yellow as a background.
+- A single "rolling" light-blue pad advances left to right, one step per beat, tracking the current position within the bar set. The first pad (column 1) blinks brighter at bar-set start; the pad at the current loop-length index blinks brighter at bar-set end.
+- **Pressing a pad sets the loop length**: pad 1 = 1 bar (4 beats), pad 2 = 2 bars (8 beats), …, pad 8 = 8 bars (32 beats).
+- If loops are running when the length changes: **increase** → existing patterns repeat to fill the added bars; **decrease** → patterns truncate to fit.
+
+**Row 7 — Loop track controls (8 loop tracks):**
+Each pad represents one independent loop track (tracks 1–8, corresponding to faders 1–8).
+
+- **Empty** (off): press → start recording from the next bar-set downbeat. Pad blinks amber while waiting, then blinks red while recording. When the recording ends, the pad turns green and the loop plays back continuously.
+- **Playing** (green): press → stop playback but keep the recording; pad turns yellow.
+- **Paused** (yellow): press → resume playback; pad turns green.
+- **Overdub / re-record**: hold a pad that has a recording for 2 seconds → new recording starts at the next bar-set downbeat; old recording is replaced when the new one completes.
+
+**Rows 1–6, Columns 1–6 — FX Control pads (36 pads total):**
+Each row in columns 1–6 maps to one FX/oscillator function.
 
 | Row | Function |
 |-----|----------|
-| 1 (bottom) | Oscillator / noise / wavetable selection (square, saw, supersaw, sine, TB-303, WhiteNoise — one waveform per pad) |
+| 1 (bottom) | Oscillator / noise / wavetable selection (square, saw, supersaw, sine, TB-303, WhiteNoise — one waveform per pad, configured via the web interface) |
 | 2 | Octave down (doubles the active oscillator one octave below) |
 | 3 | Octave up (doubles the active oscillator one octave above) |
 | 4 | Distortion |
-| 5 | Envelope shaper |
+| 5 | Delay |
 | 6 | Reverb |
-| 7 | LPF |
-| 8 (top) | HPF |
 
 - **Idle / configured**: yellow LED.
 - **Active (pressed = on)**: green LED. Press again to deactivate → returns to yellow.
 - **Unconfigured pad**: off.
 
-**Columns 7–8 — Program Change pads (16 pads total):**
-Each pad stores a full snapshot of the 48 FX Control pad states (which pads are on/off and their parameter values).
+Effect parameters (reverb room size, delay time/frequency, LPF/HPF cutoff, drive, etc.) are controlled exclusively via SMK25 knobs — not via faders.
+
+**Rows 1–6, Columns 7–8 — Program Change pads (12 pads total):**
+Each pad stores a full snapshot of the 36 FX Control pad states (which pads are on/off).
 
 - **Saved but inactive**: purple LED.
 - **Currently active**: blue LED. Goes back to purple when another PC pad is activated.
 - **Unsaved / empty**: off.
-- **Save gesture**: hold pad for 2 seconds → pad blinks blue for 1 second → snapshot saved. Overwrites any previous snapshot at that position.
+- **Save gesture**: hold pad for 2 seconds → pad blinks blue for 1 second → snapshot saved. Overwrites any previous snapshot at that position. Only one PC pad is active at a time.
 
-**Parameter edit mode (per FX pad):**
-Hold any active FX Control pad for 2 seconds → pad starts blinking green. While blinking, faders 1–6 control that effect's parameters (e.g., room size, mix, cutoff, tone, drive — whichever are relevant to that effect). When the pad is pressed again, parameters are saved and the pad returns to steady green/yellow.
-
-**APC Mini Notes Mode:**
-When the APC Mini is switched to its hardware Notes Mode, the grid sends MIDI notes instead of pad-function messages. The system must detect this (via the mode toggle message or by recognizing the note range) and pass those notes through to the melodic voice instead of treating them as FX pad events. All pad LED states and Program Change snapshots must be fully preserved and restored when the controller exits Notes Mode.
+**APC Mini v2 Notes Mode:**
+Activated on the hardware by pressing Shift + Notes. While active, the grid sends MIDI notes instead of pad-function messages — routed to the melodic voice (same as SMK25). All pad LED states (metronome row, loop track row, FX pads, PC pads) and all snapshots must be fully preserved and restored when the controller exits Notes Mode.
 
 ### APC Mini faders
 
-The APC Mini has 8 column faders (faders 1–8) and 1 master fader (fader 9).
-
-**Normal mode (no pad in parameter-edit mode):**
+The APC Mini v2 has 8 column faders (faders 1–8) and 1 master fader (fader 9).
 
 | Fader | Function |
 |-------|----------|
-| 1 | Synth volume |
-| 2 | Filter cutoff |
-| 3 | Dry/Wet mix of the active oscillator stack |
-| 4 | Global attack |
-| 5 | Global sustain |
-| 6 | Global release |
-| 7 | Backtracks (VS) volume |
-| 8 | Click track volume |
-| 9 (master) | Cue (Dica) track volume |
+| 1 | Loop track 1 volume |
+| 2 | Loop track 2 volume |
+| 3 | Loop track 3 volume |
+| 4 | Loop track 4 volume |
+| 5 | Loop track 5 volume |
+| 6 | Loop track 6 volume |
+| 7 | Loop track 7 volume |
+| 8 | Loop track 8 volume |
+| 9 (master) | Backtrack (VS) volume |
 
-**Parameter-edit mode:** faders 1–6 are remapped to the held effect's parameters (see above). Faders 7–9 continue to control backtrack/click/cue volumes uninterrupted.
+There is no parameter-edit mode via faders. All effect parameters (LPF cutoff, HPF cutoff, reverb room size, delay time/frequency, drive, etc.) are controlled exclusively by the SMK25 knobs.
 
 ### Worlde Easypad 12
 - Each pad triggers a sample file assigned via the web interface.
@@ -105,16 +115,43 @@ The APC Mini has 8 column faders (faders 1–8) and 1 master fader (fader 9).
 - Per-pad ADSR is configurable via the web interface.
 - Pads must handle rapid overlapping hits without voice-stealing artifacts.
 
+### SMK25 (Bluetooth MIDI)
+The SMK25 connects exclusively via Bluetooth MIDI (no USB). It is the primary source of melodic note input and real-time parameter control.
+
+- **25 keys**: note-on/off drives the active oscillator stack (whichever Row 1 waveform pads are currently active). Pitch, velocity, and the full shared effect chain apply.
+- **Pitch Wheel**: standard pitch bend / detune applied to all active oscillator voices.
+- **Mod Wheel (CC 1)**: maps to filter cutoff in real time.
+- **Knobs**: each knob CC maps to one engine parameter. Default assignments:
+
+| Knob | Default parameter |
+|------|-------------------|
+| 1 | LPF cutoff frequency |
+| 2 | HPF cutoff frequency |
+| 3 | Global attack |
+| 4 | Global decay |
+| 5 | Global sustain |
+| 6 | Global release |
+| 7 | Tempo (TempoClock BPM) |
+| 8 | FX wet/dry mix |
+| 9+ | Per-effect parameters (reverb room size, delay time/frequency, etc.) |
+
+All knob assignments are configurable via the web interface MIDI-learn panel. The table above is the factory default and can be fully reassigned.
+
+- **Pads**: trigger sample playback exactly as Worlde Easypad 12 pads — velocity-sensitive, per-pad ADSR, disk-streaming playback. Pad-to-sample assignments are configured via the web interface.
+
+Handle Bluetooth reconnect gracefully: on disconnect, log a warning and automatically re-register all handlers on reconnect without manual intervention.
+
 ### Web configuration interface
 A **SvelteKit** web application (SvelteKit is a good fit here: lightweight, SSR-optional, minimal runtime overhead, easy to run as a Node.js service). It must be accessible from the local network and provides:
 
 1. **File upload**: upload VS/click/Dica MP3 files and sample files to the Pi's local storage.
 2. **Setlist manager**: create, edit, reorder, load, and delete setlists. Each song entry has: name, artist, tempo (BPM), and paths to its VS/click/Dica files.
-3. **MIDI mapping**: assign any note/CC on any controller to: play, stop, next song, previous song, and any other assignable functions. Displays detected controllers and allows learn-mode mapping.
-4. **Output routing**: configure which audio channels receive VS, click, Dica, and synth outputs (FOH vs IEM).
-5. **APC Mini FX pad configuration**: an 8×8 grid UI showing the current function/waveform assigned to each pad. Allows reconfiguring oscillator waveforms and FX assignments per pad.
-6. **Worlde pad configuration**: a 2×6 grid UI for assigning sample files and ADSR parameters to each of the 12 pads.
-7. **Program Change import/export**: download or upload PC pad snapshot JSON files for backup or sharing.
+3. **MIDI mapping**: assign any note/CC on any controller to: play, stop, next song, previous song, and other assignable functions. Displays detected controllers, allows learn-mode mapping. Includes a **SMK25 knob assignment** panel where each SMK25 knob CC can be MIDI-learned to any engine parameter (LPF cutoff, HPF cutoff, attack, decay, sustain, release, reverb room size, delay time/frequency, FX mix, tempo, etc.).
+4. **Output routing**: configure which audio channels receive VS, click, Dica, synth, and loop track outputs (FOH vs IEM).
+5. **APC Mini pad configuration**: an 8×8 grid UI. Row 1 allows configuring the oscillator waveform per pad; rows 2–6 show fixed function labels; rows 7–8 show loop track and metronome status (read-only in this view).
+6. **Worlde pad configuration**: a 2×6 grid UI for assigning sample files and ADSR parameters to each of the 12 Worlde pads.
+7. **SMK25 pad configuration**: a grid UI for assigning sample files and ADSR parameters to each SMK25 pad, same style as the Worlde pad configuration.
+8. **Program Change import/export**: download or upload PC pad snapshot JSON files for backup or sharing (12 slots).
 
 The web interface runs as a separate `systemd` service. It communicates with the SuperCollider engine via OSC (or a Unix socket). It must not hold audio buffers in memory.
 
@@ -146,7 +183,7 @@ Capture real note/CC numbers for all three controllers and record them in `CONTR
 ### Step 1 — Core audio engine & SynthDef library (no MIDI yet)
 Implement all SynthDefs:
 - **Oscillators**: `\sq` (square), `\saw`, `\supersaw`, `\sine`, `\tb303`, `\wnoise`. All share the same argument interface (`freq`, `amp`, `gate`, `attack`, `sustain`, `release`, `cutoff`).
-- **Effect chain nodes**: distortion, envelope shaper, reverb, LPF, HPF — each as a bus-routed SynthDef that can be instantiated/freed independently.
+- **Effect chain nodes**: distortion, delay, reverb, LPF, HPF — each as a bus-routed SynthDef that can be instantiated/freed independently.
 - **Percussion/sample voice**: a one-shot `DiskIn`-backed sample player with velocity scaling and ADSR.
 - **Click voice**: a short sine-burst, routed only to the IEM bus, never FOH.
 
@@ -194,21 +231,42 @@ Implement the backtrack player:
 ---
 
 ### Step 5 — APC Mini FX pad engine + LED feedback
-Implement the FX pad state machine:
-- Maintain a 8×6 state matrix (rows × columns 1–6) tracking: `\off`, `\idle` (configured/yellow), `\active` (green), `\editing` (blinking green).
+Implement the FX pad state machine for rows 1–6, columns 1–6 (36 pads total):
+- Maintain a 6×6 state matrix tracking: `\off`, `\idle` (configured/yellow), `\active` (green).
 - On pad press: toggle `\idle` ↔ `\active`; apply or remove the corresponding oscillator/effect layer in the audio engine.
-- **Parameter edit mode**: a 2-second hold starts a timer (non-blocking). On timeout, enter `\editing` — redirect faders 1–6 to that effect's parameters via a CC-to-parameter mapping table. On next press of same pad, exit `\editing`, save parameters to config.
-- LED feedback: send MIDI note-on messages back to the APC Mini with the correct velocity color codes (yellow = idle, green = active, blinking = editing, off = unconfigured). Use the APC Mini's documented color code table — do not guess velocity values.
-- Faders 7–9 must continue controlling backtrack/click/cue volumes at all times, including during parameter edit mode.
+- LED feedback: send MIDI note-on messages back to the APC Mini v2 with the correct velocity color codes (yellow = idle, green = active, off = unconfigured). Use the documented APC Mini v2 color code table — do not guess velocity values.
+- There is no per-pad parameter-edit mode via faders; effect parameters are controlled exclusively via SMK25 knobs.
 
-**Verify:** exercise all 48 FX pads, confirm correct LED state transitions. Trigger parameter-edit mode on two different effect rows, confirm faders 1–6 remap correctly and faders 7–9 are unaffected. Confirm state is preserved across pad cycles.
+**Verify:** exercise all 36 FX pads, confirm correct LED transitions (yellow ↔ green ↔ off). Confirm oscillator/effect layers activate and deactivate correctly in the audio engine. Confirm state is preserved across pad cycles. Confirm faders 1–8 control loop track volumes. Confirm system runs without crash when APC Mini is offline.
+
+---
+
+### Step 5b — APC Mini Metronome row + Loop recording engine
+Implement the metronome row (Row 8), loop track row (Row 7), and loop recording engine (`src/loops.scd`):
+
+**Metronome row (Row 8):**
+- At startup, light all 8 pads dim yellow.
+- Run a `TempoClock`-quantized routine that advances a single light-blue "rolling pad" left to right, one step per beat. The pad at column 1 blinks brighter at bar-set start; the pad at the current loop-length index blinks brighter at bar-set end.
+- **Press a pad**: set the loop length to that pad's index (1–8) in bars (e.g., pad 2 = 2 bars = 8 beats). If loops are running: length increase → repeat patterns to fill added bars; length decrease → truncate patterns to fit.
+
+**Loop track row (Row 7):**
+- Maintain an 8-element state array per pad: `\empty` (off), `\waiting` (amber blink), `\recording` (red blink), `\playing` (green), `\paused` (yellow).
+- **Press empty pad**: transition to `\waiting` until the next bar-set downbeat, then `\recording` for exactly one bar set, then `\playing`.
+- **Press playing pad**: stop playback → `\paused` (recording preserved).
+- **Press paused pad**: resume → `\playing`.
+- **Hold pad with recording for 2 seconds**: transition to `\waiting` (overdub), then `\recording` on the next bar-set downbeat; new take replaces old on completion.
+- Faders 1–8 control loop track volumes 1–8 in real time.
+
+All loop boundaries are strictly quantized to bar-set downbeats from the shared `TempoClock`. Never allow loop drift.
+
+**Verify:** record a 2-bar loop; confirm playback in sync with the metronome row LED. Increase loop length (confirm repeat) and decrease (confirm truncation). Pause and resume. Overdub and confirm old take is replaced. Confirm faders 1–8 affect only their respective track volumes. Confirm all LED transitions match the spec. Confirm no crash when APC Mini is offline.
 
 ---
 
 ### Step 6 — APC Mini Program Change system
-Implement the PC pad state machine (columns 7–8):
-- Maintain a 8×2 state matrix tracking: `\empty` (off), `\saved` (purple), `\active` (blue).
-- On pad press: load the saved snapshot onto the FX Control pad matrix, re-render all 48 FX LED states, and update the audio engine to match.
+Implement the PC pad state machine (rows 1–6, columns 7–8 — 12 pads total):
+- Maintain a 6×2 state matrix tracking: `\empty` (off), `\saved` (purple), `\active` (blue).
+- On pad press: load the saved snapshot onto the FX Control pad matrix, re-render all 36 FX LED states, and update the audio engine to match.
 - **Save gesture**: 2-second hold → blink blue for 1 second → save current FX pad matrix as snapshot at this position. Overwrites previous snapshot if present. If pad was empty, it becomes `\saved`.
 - Snapshots are persisted to a JSON config file immediately on save.
 - Only one PC pad can be `\active` at a time; pressing a new PC pad deactivates the previous one.
@@ -217,32 +275,37 @@ Implement the PC pad state machine (columns 7–8):
 
 ---
 
-### Step 7 — APC Mini notes mode
-Detect when the APC Mini switches to Notes Mode:
-- Identify the mode-toggle message (program change or sysex, per APC Mini documentation) and set an internal flag `apcNotesMode = true`.
-- While in Notes Mode, route grid messages to the melodic voice (same pitch/velocity handling as SMK25) instead of FX pad logic.
-- On exit from Notes Mode: restore all 64 pad LEDs to exactly the state they were in before Notes Mode was entered (FX pads + PC pads).
-- Do not alter any FX pad or PC pad state while in Notes Mode.
+### Step 7 — APC Mini v2 Notes Mode
+Detect when the APC Mini v2 switches to Notes Mode (Shift + Notes on the hardware):
+- Detect the mode-toggle message and set an internal flag `apcNotesMode = true`.
+- While in Notes Mode, route grid note messages to the melodic voice (same pitch/velocity handling as SMK25) instead of FX pad logic.
+- On exit from Notes Mode: restore all 64 pad LEDs to exactly the state they were in before Notes Mode was entered — metronome row (row 8), loop track row (row 7), FX pads (rows 1–6, cols 1–6), and PC pads (rows 1–6, cols 7–8).
+- Do not alter any pad state (loop recordings, FX active states, PC snapshots) while in Notes Mode.
 
-**Verify:** enter Notes Mode, play notes, confirm melodic voice triggers. Exit Notes Mode, confirm all LED states are exactly restored.
-
----
-
-### Step 8 — SMK25 (Bluetooth) → melodic voice
-Wire SMK25 Bluetooth MIDI note-on/off to trigger/release the active oscillator stack (whichever Row 1 waveform pads are currently active). Pitch, velocity, and the full effect chain apply.
-
-Handle Bluetooth reconnect gracefully: if the SMK25 disconnects mid-performance, log a warning and re-register the handler on reconnect without any manual intervention.
-
-**Verify:** play notes, confirm correct pitch/velocity response and clean note-off (no stuck notes). Simulate disconnect/reconnect and confirm automatic handler re-registration. Log any dropped note-offs.
+**Verify:** enter Notes Mode, play notes, confirm melodic voice triggers. Exit Notes Mode, confirm all LED states are exactly restored including metronome and loop rows.
 
 ---
 
-### Step 9 — Worlde Easypad 12 → sample playback
-Wire each of the 12 pads to its configured sample file (assigned via web config). Use disk-streaming playback (`VDiskIn` or `Buffer.readChannel` with appropriate size). Apply per-pad ADSR and velocity scaling from the config.
+### Step 8 — SMK25 (Bluetooth) → melodic voice, knobs, and pads
+Wire all SMK25 Bluetooth MIDI inputs:
+- **Keys (note-on/off)**: trigger/release the active oscillator stack (whichever Row 1 waveform pads are active). Pitch, velocity, and the full effect chain apply.
+- **Pitch Wheel**: standard pitch bend on all active voices.
+- **Mod Wheel (CC 1)**: maps to filter cutoff in real time.
+- **Knobs**: dispatch each knob CC to its assigned engine parameter (per MIDI-learn config). Default: knob 1 = LPF cutoff, knob 2 = HPF cutoff, knobs 3–6 = attack/decay/sustain/release, knob 7 = TempoClock BPM, knob 8 = FX wet/dry mix, additional knobs = per-effect parameters.
+- **Pads**: trigger sample playback (velocity-sensitive, per-pad ADSR, disk-streaming) identical to Worlde Easypad 12 pads. Assignments loaded from config.
 
-Pads must handle rapid overlapping hits: a new hit on a pad should start a new voice without cutting off the previous one (up to a reasonable polyphony cap — 4 simultaneous voices per pad is sufficient).
+Handle Bluetooth reconnect gracefully: log a warning on disconnect and automatically re-register all handlers on reconnect.
 
-**Verify:** trigger all 12 pads individually and in rapid overlapping succession. Confirm velocity response, ADSR shaping, no voice-stealing clicks. Confirm with a missing sample file — log warning, do not crash.
+**Verify:** play notes, confirm pitch/velocity and clean note-off. Move pitch wheel — confirm bend. Move mod wheel — confirm cutoff change. Move each knob — confirm corresponding parameter responds. Trigger SMK25 pads — confirm sample playback with velocity/ADSR. Simulate BT disconnect/reconnect — confirm automatic re-registration. Log any dropped note-offs.
+
+---
+
+### Step 9 — Worlde Easypad 12 + SMK25 pads → sample playback
+Wire each of the 12 Worlde pads and each SMK25 pad to its configured sample file (assigned via web config). Both controllers use the same disk-streaming playback path (`VDiskIn` or `Buffer.readChannel` with appropriate size) and the same per-pad ADSR and velocity scaling from the config.
+
+Pads from both controllers must handle rapid overlapping hits without voice-stealing (up to 4 simultaneous voices per pad).
+
+**Verify:** trigger all 12 Worlde pads and all SMK25 pads individually and in rapid overlapping succession. Confirm velocity response, ADSR shaping, no voice-stealing clicks. Confirm with a missing sample file — log warning, do not crash.
 
 ---
 
@@ -270,11 +333,12 @@ Implement the SvelteKit web app as described in the Architecture section. The ap
 Required pages:
 1. **Files** — upload VS/click/Dica MP3 files and sample files. Files are saved to a dedicated directory on the Pi's storage; no file content is kept in process memory after the upload stream completes.
 2. **Setlists** — create, edit, reorder, load, and delete setlists. Each song: name, artist, BPM, file assignments.
-3. **MIDI Mapping** — learn-mode assignment for play/stop/next/prev and other assignable functions.
-4. **Output Routing** — channel assignment for VS, click, Dica, synth (FOH/IEM/both).
-5. **APC Mini Pads** — 8×8 grid UI; configure oscillator type per pad in Row 1; label/function shown for all other rows.
+3. **MIDI Mapping** — learn-mode assignment for play/stop/next/prev and other assignable functions. Includes **SMK25 knob assignment** panel: MIDI-learn each knob CC to any engine parameter (LPF, HPF, attack, decay, sustain, release, reverb room size, delay time/frequency, FX mix, tempo, etc.).
+4. **Output Routing** — channel assignment for VS, click, Dica, synth, and loop track outputs (FOH/IEM/both).
+5. **APC Mini Pads** — 8×8 grid UI; configure oscillator waveform per pad in Row 1; rows 2–6 show fixed function labels; rows 7–8 show loop track and metronome status (read-only).
 6. **Worlde Pads** — 2×6 grid UI; assign sample file and ADSR per pad.
-7. **Program Change** — list of 16 PC pad slots with import/export (JSON) per slot.
+7. **SMK25 Pads** — grid UI; assign sample file and ADSR per SMK25 pad.
+8. **Program Change** — list of 12 PC pad slots with import/export (JSON) per slot.
 
 **Verify:** access the interface from a second device on the local network. Upload a test file, create a setlist, save a MIDI mapping. Confirm the SuperCollider engine receives and applies each change via OSC. Confirm system `free` memory does not decrease significantly while the interface is in use.
 
@@ -324,6 +388,7 @@ Monitor and log: `s.avgCPU`, `s.peakCPU`, JACK xrun count, system RAM (`free -m`
    - `src/midi_routing.scd` — offline-resilient MIDI handler registration and device watcher
    - `src/apc_leds.scd` — APC Mini LED state machine and color code table
    - `src/apc_pads.scd` — FX pad and Program Change pad logic
+   - `src/loops.scd` — loop recording engine (metronome row, loop track controls, quantized record/playback/overdub)
    - `src/backtrack.scd` — backtrack engine (disk streaming, setlist, routing, OSC commands)
    - `src/clock.scd` — shared `TempoClock` management
    - `src/main.scd` — top-level boot, service orchestration, OSC server

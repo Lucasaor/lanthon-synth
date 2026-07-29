@@ -61,11 +61,11 @@ SynthDef(\lanth0nVoice, {
 	sineOctDn=0, sineOctUp=0,
 	tb303OctDn=0, tb303OctUp=0,
 	noiseOctDn=0, noiseOctUp=0,
-	// --- Global ADSR + tone ---
-	attack=0.01, sustain=0.7, release=0.3,
-	cutoff=4000,            // pre-LPF cutoff on the voice (not the FX chain LPF)
+	// --- Global ADSR + tone (all four params driven by SMK25 knobs 3-6) ---
+	attack=0.01, decay=0.1, sustain=0.7, release=0.3,
+	cutoff=4000,            // pre-LPF voice cutoff; also driven by Mod Wheel CC1
 	dryWet=1.0,             // mix level into the send bus
-	amp=0.5;                // master amplitude (Fader 1 maps here)
+	amp=0.5;                // master amplitude
 
 	var lagT = 0.02;        // lag time for all level params (prevents clicks)
 
@@ -120,7 +120,7 @@ SynthDef(\lanth0nVoice, {
 
 	// ── Amplitude ADSR ───────────────────────────────────────────────────
 	var env = EnvGen.kr(
-		Env.adsr(attack.lag(lagT), 0.1, sustain.lag(lagT), release.lag(lagT), curve: -4),
+		Env.adsr(attack.lag(lagT), decay.lag(lagT), sustain.lag(lagT), release.lag(lagT), curve: -4),
 		gate: gate,
 		levelScale: vel.clip(0.01, 1.0),
 		doneAction: Done.freeSelf
@@ -151,16 +151,16 @@ SynthDef(\lanth0nVoice, {
 ~initEffectChain = {
 	Ndef(\masterFX, {
 		|
-		// Distortion (row 4)
+		// Distortion (row 4, APC pad-toggled)
 		distActive=0, distDrive=0.3, distTone=0.6, distMix=0.5,
-		// Tremolo / envelope LFO (row 5)
-		envActive=0, envRate=4.0, envDepth=0.4,
-		// Reverb (row 6)
+		// Delay (row 5, APC pad-toggled; time/feedback driven by SMK25 knobs)
+		delayActive=0, delayTime=0.3, delayFeedback=0.4, delayMix=0.5,
+		// Reverb (row 6, APC pad-toggled; room/damp driven by SMK25 knobs)
 		revActive=0, revRoom=0.5, revDamp=0.4, revMix=0.3,
-		// LPF (row 7)
-		lpfActive=0, lpfCutoff=0.8, lpfRes=0.1,
-		// HPF (row 8)
-		hpfActive=0, hpfCutoff=0.05
+		// LPF — always active; cutoff driven by SMK25 knob 1 (default = pass-through)
+		lpfCutoff=0.98, lpfRes=0.1,
+		// HPF — always active; cutoff driven by SMK25 knob 2 (default = pass-through)
+		hpfCutoff=0.0
 		|
 
 		var sig = In.ar(~synthSendBus.index, 2);
@@ -177,25 +177,27 @@ SynthDef(\lanth0nVoice, {
 		distSig = LPF.ar(distSig, p.(distTone).linexp(0.0, 1.0, 500.0, 15000.0));
 		sig = xf.(sig, distSig, distMix, distActive);
 
-		// ── Tremolo ──────────────────────────────────────────────────────
-		var lfo = SinOsc.kr(p.(envRate), 0,
-			p.(envDepth) * 0.5, 1.0 - (p.(envDepth) * 0.5));
-		var envSig = sig * lfo;
-		sig = xf.(sig, envSig, 1.0, envActive);
+		// ── Delay (AllpassC: feedback delay, max 1 s) ────────────────────
+		// delayTime (0-1 → 10ms-1s), delayFeedback (0-1 → 10ms-3s decay).
+		// Driven by SMK25 knobs via ~setFXParam.
+		var dlySig = AllpassC.ar(sig, 1.0,
+			p.(delayTime).linlin(0.0, 1.0, 0.01, 1.0),
+			p.(delayFeedback).linlin(0.0, 1.0, 0.01, 3.0));
+		sig = xf.(sig, dlySig, delayMix, delayActive);
 
 		// ── Reverb ───────────────────────────────────────────────────────
 		var revSig = FreeVerb.ar(sig, p.(revMix), p.(revRoom), p.(revDamp));
 		sig = xf.(sig, revSig, revMix, revActive);
 
-		// ── LPF ─────────────────────────────────────────────────────────
+		// ── LPF — always active; SMK25 knob 1 sweeps cutoff ─────────────
+		// Default lpfCutoff=0.98 → ~19kHz (essentially pass-through).
 		var lpfHz = p.(lpfCutoff).linexp(0.0, 1.0, 80.0, 20000.0);
-		var lpfSig = RLPF.ar(sig, lpfHz, p.(lpfRes).clip(0.01, 1.0));
-		sig = xf.(sig, lpfSig, 1.0, lpfActive);
+		sig = RLPF.ar(sig, lpfHz, p.(lpfRes).clip(0.01, 1.0));
 
-		// ── HPF ─────────────────────────────────────────────────────────
+		// ── HPF — always active; SMK25 knob 2 sweeps cutoff ─────────────
+		// Default hpfCutoff=0.0 → ~20Hz (essentially pass-through).
 		var hpfHz = p.(hpfCutoff).linexp(0.0, 1.0, 20.0, 8000.0);
-		var hpfSig = HPF.ar(sig, hpfHz);
-		sig = xf.(sig, hpfSig, 1.0, hpfActive);
+		sig = HPF.ar(sig, hpfHz);
 
 		sig;
 	});
@@ -205,47 +207,46 @@ SynthDef(\lanth0nVoice, {
 };
 
 // ── Convenience: set a single effect active/inactive ─────────────────────────
-// effectKey is one of: \distActive, \envActive, \revActive, \lpfActive, \hpfActive
+// effectKey is one of: \distActive, \delayActive, \revActive
 ~setFXActive = { |effectKey, isActive|
 	Ndef(\masterFX).set(effectKey, if(isActive, 1, 0));
 };
 
-// ── Convenience: set a parameter of an effect (normalized 0-1) ──────────────
+// ── Convenience: set a parameter of an effect or voice (normalized 0-1) ─────
+// Used by SMK25 knob routing in midi_routing.scd.
 ~setFXParam = { |paramKey, val|
 	Ndef(\masterFX).set(paramKey, val);
 };
 
-// ── Effect parameter tables (used by apc_pads.scd for fader remapping) ───────
-// Each entry is [paramKey, defaultValue, label].
-// Fader index 0 = fader 1 in the docs.
+// ── Effect parameter tables for each pad-toggled effect ──────────────────────
+// Used by the web UI to know which SMK25 knobs are relevant per effect.
 ~fxParamTable = IdentityDictionary[
-	\dist -> [
-		[\distDrive, 0.3, "Drive"],
-		[\distTone,  0.6, "Tone"],
-		[\distMix,   0.5, "Mix"]
+	\dist  -> [
+		[\distDrive,      0.3,  "Drive"],
+		[\distTone,       0.6,  "Tone"],
+		[\distMix,        0.5,  "Mix"]
 	],
-	\env  -> [
-		[\envRate,  4.0, "Rate"],
-		[\envDepth, 0.4, "Depth"]
+	\delay -> [
+		[\delayTime,      0.3,  "Time"],
+		[\delayFeedback,  0.4,  "Feedback"],
+		[\delayMix,       0.5,  "Mix"]
 	],
-	\rev  -> [
-		[\revRoom, 0.5, "Room"],
-		[\revDamp, 0.4, "Damp"],
-		[\revMix,  0.3, "Mix"]
-	],
-	\lpf  -> [
-		[\lpfCutoff, 0.8, "Cutoff"],
-		[\lpfRes,    0.1, "Res"]
-	],
-	\hpf  -> [
-		[\hpfCutoff, 0.05, "Cutoff"]
+	\rev   -> [
+		[\revRoom,        0.5,  "Room"],
+		[\revDamp,        0.4,  "Damp"],
+		[\revMix,         0.3,  "Mix"]
 	]
 ];
+// LPF/HPF params are also SMK25-controllable but not APC-pad-toggled.
+~lfhpParamTable = IdentityDictionary[
+	\lpf -> [[\lpfCutoff, 0.98, "Cutoff"], [\lpfRes, 0.1, "Res"]],
+	\hpf -> [[\hpfCutoff, 0.0,  "Cutoff"]]
+];
 
-// ── Per-row effect key lookup (row 0-indexed) ─────────────────────────────────
-~rowFXKey = [nil, nil, nil, \dist, \env, \rev, \lpf, \hpf];
-// rows 0,1,2 = oscillators/octave — no FX chain effect
-// rows 3-7 map to effect keys
+// ── Per-row effect key lookup (row 0-indexed, rows 0-5 only) ─────────────────
+// rows 0-2 = oscillators/octave doublers — no FX chain effect
+// rows 3-5 = distortion, delay, reverb
+~rowFXKey = [nil, nil, nil, \dist, \delay, \rev];
 
 // =============================================================================
 // SAMPLE VOICE — \sampleVoice (for Worlde Easypad 12)

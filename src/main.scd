@@ -8,12 +8,11 @@
 // Module loading order (each depends on the previous):
 //   1. synths.scd        — SynthDefs + ~initEffectChain function
 //   2. apc_leds.scd      — LED state machine helpers
-//   3. apc_pads.scd      — FX pad + PC pad state machine
-//   4. backtrack.scd     — backtrack engine + OSC responders
-//   5. clock.scd         — TempoClock + click routine
-//   6. midi_routing.scd  — MIDI handlers (calls all of the above)
-//
-// loops.scd is NOT loaded — it has been superseded by apc_pads.scd.
+//   3. apc_pads.scd      — FX pad + PC pad state machine (rows 0–5)
+//   4. loops.scd         — Metronome row + 8-track loop engine (rows 6–7)
+//   5. backtrack.scd     — backtrack engine + OSC responders
+//   6. clock.scd         — TempoClock + click routine
+//   7. midi_routing.scd  — MIDI handlers (calls all of the above)
 // =============================================================================
 
 // Project root (parent of /src)
@@ -72,7 +71,14 @@ s.waitForBoot({
 	~initAPCPads.();
 	"  APC pad state machine ready.".postln;
 
-	// ── 4. Backtrack engine ──────────────────────────────────────────────
+	// ── 4. Loop engine (metronome row + 8-track looper) ──────────────────
+	"[BOOT] Loading loops.scd...".postln;
+	thisProcess.interpreter.executeFile(~projectDir +/+ "src/loops.scd");
+	s.sync;
+	~initLoops.();
+	"  Loop engine ready.".postln;
+
+	// ── 5. Backtrack engine ───────────────────────────────────────────
 	"[BOOT] Loading backtrack.scd...".postln;
 	~mediaDir    = ~projectDir +/+ "media";
 	~setlistsDir = ~projectDir +/+ "setlists";
@@ -80,18 +86,18 @@ s.waitForBoot({
 	~initBacktrack.();
 	"  Backtrack engine ready.".postln;
 
-	// ── 5. Master effect chain ───────────────────────────────────────────
+	// ── 5. Master effect chain ─────────────────────────────────────────
 	"[BOOT] Initializing master effect chain...".postln;
 	~initEffectChain.();
 	"  masterFX Ndef running.".postln;
 
-	// ── 6. Shared clock + click ──────────────────────────────────────────
+	// ── 6. Shared clock + click ─────────────────────────────────────────
 	"[BOOT] Loading clock.scd...".postln;
 	thisProcess.interpreter.executeFile(~projectDir +/+ "src/clock.scd");
 	~startClock.(~clockBpm);
 	"  Clock started at % BPM".format(~clockBpm).postln;
 
-	// ── 7. MIDI routing ──────────────────────────────────────────────────
+	// ── 7. MIDI routing ──────────────────────────────────────────────
 	"[BOOT] Loading midi_routing.scd...".postln;
 	thisProcess.interpreter.executeFile(~projectDir +/+ "src/midi_routing.scd");
 	~initMIDI.();
@@ -126,6 +132,7 @@ s.waitForBoot({
 	"    ~loadSetlist.(\"name\")  — load a setlist".postln;
 	"    ~btPlay.()             — start backtrack".postln;
 	"    ~btStop.()             — stop backtrack".postln;
+	"    ~stopAllLoops.()       — stop all loop tracks".postln;
 	"    ~panicStop.()          — emergency stop all".postln;
 	"    ~testLEDs.()           — test APC LED wiring".postln;
 	"    s.avgCPU.postln        — CPU check".postln;

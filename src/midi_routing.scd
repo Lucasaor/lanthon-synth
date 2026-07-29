@@ -35,8 +35,42 @@
 
 // Backtrack MIDI action map — populated from config/midi_map.json at runtime.
 // Format: IdentityDictionary[ srcID -> IdentityDictionary[ note/CC -> action ] ]
-// actions: \btPlay, \btStop, \btNext, \btPrev
+// actions: tPlay, tStop, tNext, tPrev
 ~midiActionMap = IdentityDictionary.new;
+
+// =============================================================================
+// SMK25 KNOB CC MAP (MIDI-learn driven)
+// =============================================================================
+// Maps knob CC number → handler symbol.
+// Loaded from config/midi_map.json (\smkKnobs section) at startup.
+// Default mapping hard-coded here; overridden by config file.
+//
+// Handler symbols:
+//   \lpfCutoff, \hpfCutoff           → Ndef(\masterFX) param (normalised 0-1)
+//   \attack, \decay, \sustain, \release  → ~voiceParams + running voices
+//   \tempo                           → TempoClock BPM
+//   \fxMix                           → ~voiceParams[\dryWet]
+//   \delayTime, \delayFeedback        → Ndef(\masterFX) param
+//   \revRoom, \revDamp               → Ndef(\masterFX) param
+//   \distDrive                       → Ndef(\masterFX) param
+
+// Default mapping (CC 70-78 = typical SMK-25 knob range).
+// Change CCs to match your hardware after running calibration.scd.
+~smkKnobMap = IdentityDictionary[
+	70 -> \lpfCutoff,
+	71 -> \hpfCutoff,
+	72 -> \attack,
+	73 -> \decay,
+	74 -> \sustain,
+	75 -> \release,
+	76 -> \tempo,
+	77 -> \fxMix,
+	78 -> \delayTime,
+	79 -> \delayFeedback,
+	80 -> \revRoom,
+	81 -> \revDamp,
+	82 -> \distDrive
+];
 
 // =============================================================================
 // VOICE POOL (for live parameter updates)
@@ -49,16 +83,21 @@
 ~apcNotesVoices   = List.new;   // APC Notes Mode: [ [noteNum, synthNode], ... ]
 
 // =============================================================================
-// SAMPLE BUFFER POOL (for Worlde Easypad 12)
+// SAMPLE BUFFER POOL (for Worlde Easypad 12 AND SMK25 pads)
 // =============================================================================
-// Pad buffers are loaded at init from the pad config file.
-// Index 0-11 = pads 1-12.
-~easyPadBuffers = Array.fill(12, { nil });  // Buffer objects per pad
-~easyPadConfig  = Array.fill(12, {         // ADSR per pad (defaults)
+~easyPadBuffers = Array.fill(12, { nil });
+~easyPadConfig  = Array.fill(12, {
 	IdentityDictionary[\attack -> 0.005, \decay -> 0.1, \sustain -> 0.8, \release -> 0.3, \amp -> 0.8]
 });
-// Active sample voices per pad (for polyphony cap enforcement)
-~easyPadVoices = Array.fill(12, { List.new });
+~easyPadVoices  = Array.fill(12, { List.new });
+
+// SMK25 pads — same structure as Easypad
+~smkPadBuffers  = Array.fill(16, { nil });   // SMK25 has up to 16 pads (check hardware)
+~smkPadConfig   = Array.fill(16, {
+	IdentityDictionary[\attack -> 0.005, \decay -> 0.1, \sustain -> 0.8, \release -> 0.3, \amp -> 0.8]
+});
+~smkPadVoices   = Array.fill(16, { List.new });
+~smkPadNoteMap  = IdentityDictionary.new;   // note → padIndex (0-15)
 
 // =============================================================================
 // MIDI INITIALIZATION (offline-resilient)
@@ -123,8 +162,14 @@
 	// Load sample buffers for Worlde pads
 	~loadEasypadBuffers.();
 
+	// Load sample buffers for SMK25 pads
+	~loadSMKPadBuffers.();
+
 	// Load backtrack MIDI mapping from config
 	~loadMIDIActionMap.();
+
+	// Load SMK25 knob map overrides from config
+	~loadSMKKnobMap.();
 
 	// Start device-watcher (reconnect detection, including BT)
 	~startDeviceWatcher.();
@@ -264,13 +309,95 @@ MIDIdef.bend(\smk_bend, { |val, chan, src|
 	}
 }, srcID: nil);
 
-// Mod wheel (CC 1) → cutoff
+// SMK25 Mod Wheel (CC 1) → cutoff
 MIDIdef.cc(\smk_mod, { |val, ccNum, chan, src|
 	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
 	if (ccNum == 1, {
 		var cutoff = val.linexp(0, 127, 80.0, 18000.0);
 		~voiceParams[\cutoff] = cutoff;
 		~lanth0nVoices.do { |e| if (e[1].notNil, { e[1].set(\cutoff, cutoff); }); };
+	});
+}, srcID: nil);
+
+// SMK25 knobs → effect/voice parameters (CC map from ~smkKnobMap)
+MIDIdef.cc(\smk_knobs, { |val, ccNum, chan, src|
+	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
+	if (ccNum == 1, { ^nil });   // Mod Wheel handled above
+
+	var paramSym = ~smkKnobMap[ccNum];
+	if (paramSym.isNil, { ^nil });
+
+	var norm = val / 127.0;
+	switch(paramSym,
+		\lpfCutoff, {
+			if (Ndef(\masterFX).notNil, { Ndef(\masterFX).set(\lpfCutoff, norm); });
+		},
+		\hpfCutoff, {
+			if (Ndef(\masterFX).notNil, { Ndef(\masterFX).set(\hpfCutoff, norm); });
+		},
+		\attack, {
+			var v = norm.linexp(0.0, 1.0, 0.001, 4.0);
+			~voiceParams[\attack] = v;
+			~lanth0nVoices.do { |e| if (e[1].notNil, { e[1].set(\attack, v); }); };
+		},
+		\decay, {
+			var v = norm.linexp(0.0, 1.0, 0.001, 4.0);
+			~voiceParams[\decay] = v;
+			~lanth0nVoices.do { |e| if (e[1].notNil, { e[1].set(\decay, v); }); };
+		},
+		\sustain, {
+			~voiceParams[\sustain] = norm;
+			~lanth0nVoices.do { |e| if (e[1].notNil, { e[1].set(\sustain, norm); }); };
+		},
+		\release, {
+			var v = norm.linexp(0.0, 1.0, 0.01, 8.0);
+			~voiceParams[\release] = v;
+			~lanth0nVoices.do { |e| if (e[1].notNil, { e[1].set(\release, v); }); };
+		},
+		\tempo, {
+			var bpm = norm.linlin(0.0, 1.0, 40.0, 240.0);
+			if (~setBpm.notNil, { ~setBpm.(bpm); });
+		},
+		\fxMix, {
+			~voiceParams[\dryWet] = norm;
+			~lanth0nVoices.do { |e| if (e[1].notNil, { e[1].set(\dryWet, norm); }); };
+		},
+		// All other keys: pass directly to masterFX Ndef
+		{
+			if (Ndef(\masterFX).notNil, { Ndef(\masterFX).set(paramSym, norm); });
+		}
+	);
+}, srcID: nil);
+
+// SMK25 pads → sample playback (same mechanism as Worlde Easypad)
+MIDIdef.noteOn(\smk_pad_on, { |vel, note, chan, src|
+	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
+
+	// Only route notes that are mapped as pad notes (not in the melodic range).
+	// ~smkPadNoteMap is populated from config/pads_smk.json.
+	var padIdx = ~smkPadNoteMap[note];
+	if (padIdx.isNil, { ^nil });   // not a pad note; handled by smk_noteon below
+
+	var buf = ~smkPadBuffers[padIdx];
+	if (buf.isNil, {
+		"[SMK] Pad % has no buffer assigned".format(padIdx).postln;
+		^nil
+	});
+	var cfg = ~smkPadConfig[padIdx];
+	var synth = Synth(\sampleVoice, [
+		\out,     ~mainOutBus,
+		\buf,     buf.bufnum,
+		\vel,     vel.linlin(0, 127, 0.01, 1.0),
+		\attack,  cfg[\attack]  ? 0.005,
+		\decay,   cfg[\decay]   ? 0.1,
+		\sustain, cfg[\sustain] ? 0.8,
+		\release, cfg[\release] ? 0.3,
+		\amp,     cfg[\amp]     ? 0.8
+	]);
+	~smkPadVoices[padIdx].add(synth);
+	if (~smkPadVoices[padIdx].size > 4, {
+		var oldest = ~smkPadVoices[padIdx].removeAt(0);
+		if (oldest.notNil, { oldest.free; });
 	});
 }, srcID: nil);
 
@@ -346,13 +473,23 @@ MIDIdef.noteOn(\apc_grid_on, { |vel, note, chan, src|
 			if (oldest[1].notNil, { oldest[1].set(\gate, 0); });
 		});
 	}, {
-		// ── Normal mode: FX pad or PC pad press ──────────────────────────
+		// ── Normal mode: FX pad / PC pad / loop pad / metronome pad ──────
 		var col = note % 8;
 		var row = note.div(8);
-		if (col < 6, {
-			~onFXPadPress.(col, row);
+		if (row == 7, {
+			// Metronome / loop-length row
+			if (~onMetronomePadPress.notNil, { ~onMetronomePadPress.(col, row); });
 		}, {
-			~onPCPadPress.(col, row);
+			if (row == 6, {
+				// Loop track row
+				if (~onLoopPadPress.notNil, { ~onLoopPadPress.(col, row); });
+			}, {
+				if (col < 6, {
+					~onFXPadPress.(col, row);
+				}, {
+					~onPCPadPress.(col, row);
+				});
+			});
 		});
 	});
 }, srcID: nil);
@@ -371,10 +508,18 @@ MIDIdef.noteOff(\apc_grid_off, { |vel, note, chan, src|
 	}, {
 		var col = note % 8;
 		var row = note.div(8);
-		if (col < 6, {
-			~onFXPadRelease.(col, row);
+		if (row == 7, {
+			// Metronome row: no release action needed
 		}, {
-			~onPCPadRelease.(col, row);
+			if (row == 6, {
+				if (~onLoopPadRelease.notNil, { ~onLoopPadRelease.(col, row); });
+			}, {
+				if (col < 6, {
+					~onFXPadRelease.(col, row);
+				}, {
+					~onPCPadRelease.(col, row);
+				});
+			});
 		});
 	});
 }, srcID: nil);
@@ -453,6 +598,50 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 };   // end ~registerHandlers
 
 // =============================================================================
+// SMK25 PAD BUFFER LOADING
+// =============================================================================
+// Reads pad config from config/pads_smk.json and loads sample files.
+
+~loadSMKPadBuffers = {
+	var cfgPath = ~projectDir +/+ "config/pads_smk.json";
+	if (File.exists(cfgPath).not, {
+		"[SMK] No pad config at % — SMK25 pads silent until configured".format(cfgPath).postln;
+		^nil
+	});
+	var cfg;
+	try { cfg = Json.parse(cfgPath); } { |err|
+		"[SMK] JSONlib not available — SMK25 pad config disabled".postln; ^nil
+	};
+	if (cfg.notNil, {
+		var pads = cfg[\pads] ? [];
+		pads.do { |pad|
+			var padIdx = pad[\pad];
+			if (padIdx.notNil and: { padIdx >= 0 } and: { padIdx < 16 }, {
+				var filePath = pad[\file];
+				var note     = pad[\note];
+				if (filePath.notNil and: { filePath.size > 0 }, {
+					var fullPath = ~projectDir +/+ "samples" +/+ filePath;
+					if (File.exists(fullPath), {
+						Buffer.read(s, fullPath, action: { |buf|
+							~smkPadBuffers[padIdx] = buf;
+							"[SMK] Pad % → % loaded".format(padIdx, filePath).postln;
+						});
+					}, {
+						"[SMK] Sample not found: %".format(fullPath).postln;
+					});
+				});
+				if (note.notNil, { ~smkPadNoteMap[note] = padIdx; });
+				if (pad[\attack].notNil,  { ~smkPadConfig[padIdx][\attack]  = pad[\attack]; });
+				if (pad[\decay].notNil,   { ~smkPadConfig[padIdx][\decay]   = pad[\decay]; });
+				if (pad[\sustain].notNil, { ~smkPadConfig[padIdx][\sustain] = pad[\sustain]; });
+				if (pad[\release].notNil, { ~smkPadConfig[padIdx][\release] = pad[\release]; });
+				if (pad[\amp].notNil,     { ~smkPadConfig[padIdx][\amp]     = pad[\amp]; });
+			})
+		}
+	});
+};
+
+// =============================================================================
 // EASYPAD BUFFER LOADING
 // =============================================================================
 // Reads pad config from config/pads_worlde.json and loads sample files.
@@ -524,6 +713,31 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 };
 
 // =============================================================================
+// SMK25 KNOB MAP LOADER (from config/midi_map.json \smkKnobs section)
+// =============================================================================
+
+~loadSMKKnobMap = {
+	var cfgPath = ~projectDir +/+ "config/midi_map.json";
+	if (File.exists(cfgPath).not, { ^nil });
+	try {
+		var cfg = Json.parse(cfgPath);
+		var knobs = cfg[\smkKnobs];
+		if (knobs.notNil, {
+			knobs.do { |entry|
+				var cc  = entry[\cc];
+				var sym = entry[\param];
+				if (cc.notNil and: { sym.notNil }, {
+					~smkKnobMap[cc.asInteger] = sym.asSymbol;
+				});
+			};
+			"[MIDI] Loaded % SMK25 knob mappings".format(knobs.size).postln;
+		});
+	} { |err|
+		"[MIDI] Could not load SMK25 knob map: %".format(err).postln;
+	};
+};
+
+// =============================================================================
 // BACKTRACK MIDI ACTION MAP LOADING
 // =============================================================================
 // Reads config/midi_map.json. Format (simplified):
@@ -566,6 +780,7 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 	"!!! PANIC STOP !!!".postln;
 	~btStop.();                   // stop backtrack playback
 	~stopClock.();                // halt shared clock
+	if (~stopAllLoops.notNil, { ~stopAllLoops.(); });  // stop all loop tracks
 	// Release all active melodic voices (SMK25 pool)
 	~lanth0nVoices.do { |entry|
 		if (entry[1].notNil, { entry[1].set(\gate, 0); });

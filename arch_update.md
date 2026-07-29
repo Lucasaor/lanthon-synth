@@ -1,56 +1,46 @@
-Claude, I need to update the file `prompt.md` to configure the new the behavior of the synth that we are developing. Here's a complete description of all new features.
+Claude, I need to update the file `prompt.md` yet again to configure the new the behavior of the synth that we are developing. Here's a complete description of all new features.
 
-# Synth Name
-From now on, we will call this system **LANTH0N 5YNTH**.
 
-# Add I2C OLED mini scrreen
-We need to add an OLED 0.96 blue/yellow screen, controlled by I2C, with an **SSD1306** controller. We will use this display to monitor states and control backtracking files (see topic below). Everything related to the backtrack functionalities should be displayed here.
 
-# Add Backtrack and click track (VS/Click) support
-The system should have an specific functionality to run backtracks (VS), click tracks (click), and cue tracks (Dica) during the show. Here's the expected features:
-- We will have setlists, with song orders, song name, and artists. I need the system to select a setlist and load them.
-- The selected setlist, current state (play, stop), artist and song name should all be displayed on the OLED screen
-- I need to be able to navigate in the setlist (next, prev song), play and stop from one of the MIDI controllers. So we will need a MIDI mapping function
-- The synth live stuff should happen in parallel with the playback of this media.
-- We need to be able to configure the routing of the output channels to allow click tracks go only on IEM and the others to FOH.
-- The media of the backtracks need to be streamed straight from disk instead of loaded in RAM
-- We will have one audio file for each track on the playback. For example, a song called "Nightmare Creatures" will have the following files: 
-   - `nightmare creatures (VS).mp3`: Main backtracks, route to FOH
-   - `nightmare creatures (click).mp3`: click source, route to IEM
-   - `nightmare creatures (Dica).mp3`: cue tracks, route to IEM
-- **important!**: Along with each playback file, we need to set its tempo and use it to the synth config. We don't need to infer the tempo from the file, we can set this from the configuration interface (see the last topic of this prompt).
-
-# AKAI MPCmini pad mapping:
-the 8x8 pad will be used to manage the source oscillators of the synth. Here's the description of what I need on it, from bottom to top, left to right:
-1. Pads on columns 1 to 6 are **FX control pads**, they will build the tone. Pads on the columns 7 and 8 are **Program Change pads**. We will save use it to quick switch what configurations are set in the other 48 pads.
-2.  All FX control pads that have a function configured should be yellow. When they are pressed, they activate its function and turn green, and deactivate the function and turn back to yellow when pressed again.
-3. All Program Change pads should that have a program saved should be purple. When they are pressed, they change the configs on the FX control pads and turn blue. They go back to purple when another Program Change pad is pressed. 
-4. FX control pads:
+# AKAI MPCmini Loop Controlling
+the 8x8 pad will now be used to manage the source oscillators, some active FX and **Looping**. Here's the description of what I need on it, from bottom to top, left to right:
+1. The row 8 of the controller (the top one) should be a "metronome". The entire row show be a dim yellow, with a "rolling pad" light blue, moving from the left to the right, following the tempo of the metronome, where the first pad of the row blink when the bar set begins, and the last one when the bar set ends, with evenly timing distributed along the other pads. 
+   - We will also use these pads to define how many bar sets we will have on the main loop. For example, pressing the second pad from left to right will set the loop length to 2 bars (8 tempos). Pressing the 4th, will set the loop length to 4 bars (16 tempos), and so on.
+   - If we already have a loop running and the **loop length increases**, repeat the pattern to fill the new "timing space".
+   - If we already have a loop running and the **loop length decreases**, cut the pattern to fit the new "timing space". 
+2. The row 7 of the controller (the second one from top to bottom) should be the **loop control**. They will be used to record bars of the sounds being played by all MIDI Controllers.
+   - Each pad will represent a "track" on the loop. when the track is empty, the pad should be off.
+   - When we press an empty pad, it should start recording from the beginning of the bar set (when the first pad on the first row blinks) until it is finished. After the recording is finished, the pad turns green and the recorded pattern starts repeating.
+   - When a track is active and playing, its pad should be green. If we press it, it should stop playing, but keep the loop saved, and turn the pad to yellow.
+   - When we press and hold for 2 seconds a pad that already have a pattern recorded, a new recording will start on the beginning of the next bar and the pattern should be overwritten.
+3. Pads on columns 1 to 6 are **FX control pads**, they will build the tone. Pads on the columns 7 and 8 are **Program Change pads**. We will save use it to quick switch what configurations are set in the other pads.
+3.  All FX control pads that have a function configured should be yellow. When they are pressed, they activate its function and turn green, and deactivate the function and turn back to yellow when pressed again.
+4. All Program Change pads should that have a program saved should be purple. When they are pressed, they change the configs on the FX control pads and turn blue. They go back to purple when another Program Change pad is pressed. 
+5. FX control pads:
    - row 1: Oscillator/noise/wavetables. These pads are the base for the signal generation. They define what will be the waveform generated by the synth (square, saw, supersaw, sine, tb303, WhiteNoise,). the synth on each should be configured on 
    - row 2: Octave down. When this pad is on, add another wave on the output of the oscillator below, transposed one octave down.
    - row 3: Octave up. When this pad is on, add another wave on the output of the oscillator below, transposed one octave up.
    - row 4: Distortion. 
-   - row 5: Envelope.
+   - row 5: delay.
    - row 6: Reverb. 
-   - row 7: LPF.
-   - Row 8: HPF.
 
-5. Effects parameters. When a pad is pressed and hold for 2 seconds, it should start blinking. In this mode, the faders 1 to 6 (from left to right) should control the parameters of that effect, depending of what is available for each effect (volume, room size, mix, tone, etc). When the pad is pressed again, the configs are saved and it go back to the normal state.
+
+5. Effects parameters. Effect parameters should be controlled using the rotary encoders on the SMK25.
 
 6. Managing Program Changes: when a PC pad is pressed and hold for 2 seconds, it should blink blue for 1 second and save a snapshot of the current configurations of the FX control pads. If the pad had other configurations before, they should be overwritten. If the pad as off, they should now save the snapshot for its position, and be purple when inactive and blue when active.
 
-7. Faders while not editing effect parameters: They should control the following properties:
-   - fader 1: Synth Volume.
-   - Fader 2: Cutoff.
-   - Fader 3: Dry/Wet mix of the active oscillators.
-   - Fader 4: Global Attack.
-   - Fader 5: Global sustain.
-   - Fader 6: Global release.
-   - Fader 7: Backtracks volume.
-   - Fader 8: Click track volume.
-   - Fader 9: Cue track volume.
+7. Faders while not editing effect parameters: They should control the volume of each loop, while fader 9 controls the volume of the backtrackloop
 
-8. Please note that the APC Mini can turn to the **notes mode** to play the notes instead of the SMK25. When it goes to notes mode, all the configurations set before should persist, and when it goes back to the default mode, the pads should turn on the lights exactly as the scene is.
+8. Please note that the APC Mini is v2 and can turn to the **notes mode** (pressing shift+nodes on the controller) to play the notes instead of the SMK25. When it goes to notes mode, all the configurations set before should persist, and when it goes back to the default mode, the pads should turn on the lights exactly as the scene is.
+
+# SMK25
+SMK25 will be the main source for notes on/off and come Control Change for the synth. Here's what we need from it:
+- Pitch Wheel: Default behavior for bending/detuning notes.
+- Mod Wheel: Cutoff
+- knobs: LPF, HPF, attack, decay, sustain, release, tempo, FX mix, FX parameters when applicable (reverb room, delay freqency, etc)
+- please add a mapping menu on the configuration interface to use MIDI learn for each knob
+- Pads on the SMK will be able to trigger samples the same way as worldle too.
+
 
 # WORDLE Pads
 The pads from worlde will play **samples** respecting velocity and ADSR envelopes. The files triggered by each pad should be configured via configuration interface.
