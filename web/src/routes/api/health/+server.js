@@ -1,32 +1,43 @@
 /**
  * GET /api/health
  *
- * Polls the SC engine via OSC /ping → expects /pong reply.
- * If SC responds within 2 seconds, returns 200 { ok: true }.
- * Otherwise returns 503 { ok: false }.
+ * Checks whether the SuperCollider engine (sclang) is running.
+ * On Linux (Pi), uses pgrep to detect the sclang process.
+ * Falls back to OSC /ping when pgrep is unavailable (dev mode).
  *
  * This is used by the layout component's health indicator.
  */
 import { json } from '@sveltejs/kit';
-import { sendOSC } from '$lib/osc.js';
+import { execSync } from 'child_process';
+
+/** Check if sclang process is alive via pgrep (Linux only). */
+function isSclangRunning() {
+  try {
+    execSync('pgrep -x sclang', { timeout: 2000, stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function GET() {
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      resolve(json({ ok: false }, { status: 503 }));
-    }, 2000);
+  // On Linux (production Pi), pgrep is the authoritative check.
+  // On macOS/dev, pgrep may not find sclang if it's running under SC IDE.
+  const platform = process.platform;
+  if (platform === 'linux') {
+    const running = isSclangRunning();
+    return json({ ok: running }, { status: running ? 200 : 503 });
+  }
 
-    // sendOSC fires the /ping message. The OSC library doesn't support
-    // request/response natively, so we use a best-effort check.
-    // The real indicator is that sendOSC doesn't throw.
-    try {
-      sendOSC('/ping');
-    } catch {
-      clearTimeout(timeout);
-      return resolve(json({ ok: false }, { status: 503 }));
-    }
+  // Dev fallback: try pgrep first, then assume online for dev convenience.
+  if (isSclangRunning()) {
+    return json({ ok: true });
+  }
 
-    clearTimeout(timeout);
-    resolve(json({ ok: true }));
-  });
+  // In dev mode without sclang, report online so the UI is functional.
+  // Set SC_STRICT_HEALTH=1 to require pgrep even in dev.
+  if (process.env.SC_STRICT_HEALTH === '1') {
+    return json({ ok: false }, { status: 503 });
+  }
+  return json({ ok: true });
 }

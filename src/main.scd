@@ -24,9 +24,9 @@
 // Tune for the Pi Zero 2W. On a desktop dev machine the defaults work fine.
 // Uncomment and adjust the device line to select your audio interface.
 
-s.options.numOutputBusChannels = 4;   // 2 = FOH, 2 = IEM
+s.options.numOutputBusChannels = 2;   // ch1=L(FOH), ch2=R(IEM)
 s.options.numInputBusChannels  = 2;
-s.options.sampleRate           = 44100;
+s.options.sampleRate           = 48000;  // CS202 USB device only supports 48k
 s.options.blockSize            = 256;  // ~5.8ms latency; lower if JACK allows
 s.options.memSize              = 8192 * 4;   // 32 MB audio memory
 s.options.maxNodes             = 512;
@@ -46,8 +46,8 @@ s.options.maxNodes             = 512;
 s.waitForBoot({
 
 	// Allocate private audio buses BEFORE loading any SynthDef file
-	~mainOutBus   = 0;
-	~iemOutBus    = 2;
+	~mainOutBus   = 0;   // L channel → FOH (house/PA)
+	~iemOutBus    = 1;   // R channel → IEM (monitor/click/cue)
 	~synthSendBus = Bus.audio(s, 2);   // private bus: voices → masterFX
 	("  synthSendBus index: " ++ ~synthSendBus.index).postln;
 

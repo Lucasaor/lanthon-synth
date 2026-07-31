@@ -91,7 +91,7 @@ def start_osc_server() -> None:
     """Start the OSC UDP listener in a background thread."""
     try:
         from pythonosc.dispatcher import Dispatcher
-        from pythonosc.server import BlockingOSCUDPServer
+        from pythonosc.osc_server import BlockingOSCUDPServer
     except ImportError:
         log.error("python-osc not installed. Run: pip3 install python-osc")
         sys.exit(1)

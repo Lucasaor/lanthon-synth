@@ -18,12 +18,12 @@
 //   - DiskIn/VDiskIn is used for all media files — nothing is preloaded to RAM.
 //
 // Bus layout (fixed indices):
-//   bus 0–1  : FOH main output (→ speaker/PA)
-//   bus 2–3  : IEM monitor output (→ click + cue only)
-//   bus 4–5  : synth send bus  (voice SynthDefs → masterFX Ndef)
+//   bus 0    : FOH main output → Left channel (speaker/PA)
+//   bus 1    : IEM monitor output → Right channel (click + cue only)
+//   bus 2–3  : synth send bus  (voice SynthDefs → masterFX Ndef, private Bus)
 
 ~mainOutBus    = 0;
-~iemOutBus     = 2;
+~iemOutBus     = 1;
 ~synthSendBus  = nil;   // allocated as a private Bus in main.scd after boot
 
 // =============================================================================
@@ -289,11 +289,11 @@ SynthDef(\sampleVoice, {
 // Files MUST be WAV or AIFF (not MP3). The web interface converts MP3→WAV
 // at upload time using ffmpeg. Buffer.cue opens a streaming buffer.
 //
-// \backtrackVS  — VS (main backtrack) → writes to ~mainOutBus (FOH)
-// \backtrackIEM — Click or Dica → writes to ~iemOutBus (IEM/monitor)
+// \backtrackVS  — VS (main backtrack) → writes to ~mainOutBus (FOH, Left channel)
+// \backtrackIEM — Click or Dica → writes to ~iemOutBus (IEM, Right channel)
 
 SynthDef(\backtrackVS, {
-	arg out=0,   // FOH bus
+	arg out=0,   // FOH bus → Left
 	buf=0,
 	rate=1.0,
 	amp=1.0;
@@ -303,7 +303,7 @@ SynthDef(\backtrackVS, {
 }).add;
 
 SynthDef(\backtrackIEM, {
-	arg out=2,   // IEM bus
+	arg out=1,   // IEM bus → Right
 	buf=0,
 	rate=1.0,
 	amp=1.0;
@@ -520,14 +520,14 @@ SynthDef(\perc, {
 // -----------------------------------------------------------------------
 
 // =============================================================================
-// CLICK — IEM only
+// CLICK — IEM only (Right channel)
 // =============================================================================
-// A short sine burst routed exclusively to ~iemOutBus (the IEM/monitor output).
+// A short sine burst routed exclusively to ~iemOutBus (the Right/IEM output).
 // The clock.scd file calls this on each beat via the shared TempoClock.
-// The click MUST never reach ~mainOutBus (FOH).
+// The click MUST never reach ~mainOutBus (FOH/Left).
 
 SynthDef(\click, {
-	arg out=2,            // default = ~iemOutBus
+	arg out=1,            // default = ~iemOutBus (Right channel)
 	freq=1800,            // Hz — 1800 for downbeat, 1000 for other beats
 	duration=0.03,
 	amp=0.5;

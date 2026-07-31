@@ -40,8 +40,8 @@
 <div class="card">
   <h2>Channel Guide</h2>
   <ul>
-    <li><strong>FOH</strong>: outputs 1–2 (main PA / house)</li>
-    <li><strong>IEM</strong>: outputs 3–4 (monitor / in-ear)</li>
-    <li><strong>BOTH</strong>: outputs 1–4</li>
+    <li><strong>FOH</strong>: Left channel (ch 1) — main PA / house</li>
+    <li><strong>IEM</strong>: Right channel (ch 2) — monitor / click / cue</li>
+    <li><strong>BOTH</strong>: Left + Right (ch 1+2)</li>
   </ul>
 </div>
