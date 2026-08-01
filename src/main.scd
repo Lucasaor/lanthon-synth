@@ -27,7 +27,7 @@
 s.options.numOutputBusChannels = 2;   // ch1=L(FOH), ch2=R(IEM)
 s.options.numInputBusChannels  = 2;
 s.options.sampleRate           = 48000;  // CS202 USB device only supports 48k
-s.options.blockSize            = 256;  // ~5.8ms latency; lower if JACK allows
+s.options.blockSize            = 1024; // ~21.3ms; Pi Zero 2W needs 1024 for stability
 s.options.memSize              = 8192 * 4;   // 32 MB audio memory
 s.options.maxNodes             = 512;
 
@@ -103,13 +103,39 @@ s.waitForBoot({
 	~initMIDI.();
 	"  MIDI routing active.".postln;
 
-	// ── CPU monitor (logs every 30s) ─────────────────────────────────────
+	// ── CPU monitor + server health + OLED heartbeat (every 30s) ──────────
 	~cpuMonitor = Routine {
+		var deadCount = 0;
 		loop {
-			"[CPU] avg=%%  peak=%%".format(
-				s.avgCPU.round(0.1), "%",
-				s.peakCPU.round(0.1), "%"
-			).postln;
+			var cpu = s.avgCPU.round(0.1);
+			var peak = s.peakCPU.round(0.1);
+			"[CPU] avg=%%  peak=%%".format(cpu, "%", peak, "%").postln;
+
+			// ── Server health check ────────────────────────────────────
+			// If the audio server died (e.g. USB disconnect → JACK crash),
+			// count consecutive failures. After 3 (~90s), exit sclang so
+			// systemd can restart the full service (JACK + SC).
+			if (s.serverRunning.not, {
+				deadCount = deadCount + 1;
+				"[HEALTH] Server NOT running (deadCount: %)".format(deadCount).postln;
+				if (deadCount >= 3, {
+					"[HEALTH] Server dead for 90s — exiting for systemd restart".postln;
+					0.exit;
+				});
+			}, {
+				deadCount = 0;  // reset on healthy check
+			});
+
+			// ── OLED heartbeat ─────────────────────────────────────────
+			// Let the OLED daemon know SC is still alive.
+			// The OLED shows a status dot: ● green = online, ○ grey = offline.
+			if (~oledSender.notNil, {
+				~oledSender.sendMsg("/oled/heartbeat",
+					if (s.serverRunning, 1, 0),
+					if (~btPlaying, 1, 0)
+				);
+			});
+
 			30.0.wait;
 		}
 	}.play(SystemClock);

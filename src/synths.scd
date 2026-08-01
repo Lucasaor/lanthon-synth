@@ -24,7 +24,9 @@
 
 ~mainOutBus    = 0;
 ~iemOutBus     = 1;
-~synthSendBus  = nil;   // allocated as a private Bus in main.scd after boot
+// Preserve the private audio Bus allocated by main.scd (if already set);
+// only default to nil for standalone use (e.g. direct sclang testing).
+~synthSendBus  = ~synthSendBus ? nil;
 
 // =============================================================================
 // MELODIC VOICE — \lanth0nVoice
@@ -170,33 +172,38 @@ SynthDef(\lanth0nVoice, {
 			// crossfade dry→wet by amt (0-1). amt*2-1 maps 0→-1 (dry) to 1→+1 (wet).
 			Select.ar(act > 0, [dry, XFade2.ar(dry, wet, amt.lag(0.05) * 2.0 - 1.0)]);
 		};
+		var distSig;
+		var dlySig;
+		var revSig;
+		var lpfHz;
+		var hpfHz;
 
 		// ── Distortion ──────────────────────────────────────────────────
 		// Soft-clip waveshaper with tone (post-filter) control.
-		var distSig = (sig * (1.0 + p.(distDrive) * 20.0)).tanh * 0.4;
+		distSig = (sig * (1.0 + p.(distDrive) * 20.0)).tanh * 0.4;
 		distSig = LPF.ar(distSig, p.(distTone).linexp(0.0, 1.0, 500.0, 15000.0));
 		sig = xf.(sig, distSig, distMix, distActive);
 
 		// ── Delay (AllpassC: feedback delay, max 1 s) ────────────────────
 		// delayTime (0-1 → 10ms-1s), delayFeedback (0-1 → 10ms-3s decay).
 		// Driven by SMK25 knobs via ~setFXParam.
-		var dlySig = AllpassC.ar(sig, 1.0,
+		dlySig = AllpassC.ar(sig, 1.0,
 			p.(delayTime).linlin(0.0, 1.0, 0.01, 1.0),
 			p.(delayFeedback).linlin(0.0, 1.0, 0.01, 3.0));
 		sig = xf.(sig, dlySig, delayMix, delayActive);
 
 		// ── Reverb ───────────────────────────────────────────────────────
-		var revSig = FreeVerb.ar(sig, p.(revMix), p.(revRoom), p.(revDamp));
+		revSig = FreeVerb.ar(sig, p.(revMix), p.(revRoom), p.(revDamp));
 		sig = xf.(sig, revSig, revMix, revActive);
 
 		// ── LPF — always active; SMK25 knob 1 sweeps cutoff ─────────────
 		// Default lpfCutoff=0.98 → ~19kHz (essentially pass-through).
-		var lpfHz = p.(lpfCutoff).linexp(0.0, 1.0, 80.0, 20000.0);
+		lpfHz = p.(lpfCutoff).linexp(0.0, 1.0, 80.0, 20000.0);
 		sig = RLPF.ar(sig, lpfHz, p.(lpfRes).clip(0.01, 1.0));
 
 		// ── HPF — always active; SMK25 knob 2 sweeps cutoff ─────────────
 		// Default hpfCutoff=0.0 → ~20Hz (essentially pass-through).
-		var hpfHz = p.(hpfCutoff).linexp(0.0, 1.0, 20.0, 8000.0);
+		hpfHz = p.(hpfCutoff).linexp(0.0, 1.0, 20.0, 8000.0);
 		sig = HPF.ar(sig, hpfHz);
 
 		sig;

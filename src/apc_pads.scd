@@ -173,13 +173,13 @@
 ~onPCPadPress = { |col, row|
 	var pcIdx = ~pcCellToIndex.(col, row);
 	if ((pcIdx >= 0) and: { pcIdx < 12 }, {
+		var state = ~pcPadState[pcIdx];
+		var holdIdx = pcIdx;
 
 		// Cancel any ongoing hold timer
 		if (~pcHoldRoutine.notNil, {
 			~pcHoldRoutine.stop; ~pcHoldRoutine = nil;
 		});
-
-		var state = ~pcPadState[pcIdx];
 
 		if (state == \saved or: { state == \active }, {
 			// ── Load this snapshot ───────────────────────────────────
@@ -187,7 +187,6 @@
 		});
 
 		// ── Start hold timer for save ─────────────────────────────────
-		var holdIdx = pcIdx;
 		~pcHoldRoutine = Routine {
 			2.0.wait;
 			// Save gesture: blink blue (green) for 1 second, then save
@@ -384,9 +383,13 @@
 		// Use JSONlib if available; JSONlib returns a parsed structure matching
 		// the JSON schema: { "snapshots": [ {...}, null, ... ] }
 		var data;
-		try {
-			data = Json.parse(path);
-			var snapshots = data[\snapshots] ? [];
+		var snapshots;
+		var jsonClass = \Json.asClass;   // nil when JSONlib is not installed
+		if (jsonClass.notNil, {
+			try { data = jsonClass.parse(path); } { |err| data = nil; };
+		});
+		if (data.notNil, {
+			snapshots = data[\snapshots] ? [];
 			snapshots.do { |snap, i|
 			if (snap.notNil and: { i < 12 }, {
 				// Rebuild the snapshot in IdentityDictionary format
@@ -404,9 +407,9 @@
 				});
 			};
 			"[APC] PC snapshots loaded from %".format(path).postln;
-		} { |err|
-			"[APC] JSONlib not available — cannot load PC snapshots: %".format(err).postln;
-		};
+		}, {
+			"[APC] JSONlib not available — cannot load PC snapshots.".postln;
+		});
 	}, {
 		"[APC] No snapshot file at % — starting with empty PC pads".format(path).postln;
 	});

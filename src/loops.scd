@@ -92,13 +92,12 @@ SynthDef(\loopPlay, {
 		loop {
 			var totalBeats = ~loopLength * ~loopBeatsPerBar;
 			var beatInSet  = beat % totalBeats;
-			~metroBeat = beatInSet;
-
 			// Map beat position to column 0-7 over the current loop length.
 			// The "last active" column is (~loopLength - 1) to stay within
 			// the 8 available pads regardless of loop length.
 			var maxCol   = (~loopLength - 1).clip(0, 7);
 			var rollCol  = beatInSet.linlin(0, totalBeats - 1, 0, maxCol).round.asInteger;
+			~metroBeat = beatInSet;
 			~updateMetronomeRow.(rollCol, beatInSet == 0);
 
 			beat = beat + 1;
@@ -220,11 +219,6 @@ SynthDef(\loopPlay, {
 
 // Schedule a new recording to start at the next bar-set downbeat.
 ~scheduleLoopRecord = { |track|
-	~loopState[track] = \waiting;
-	~updateLoopTrackLED.(track);
-	~stopLoopPlayback.(track);   // stop any existing playback
-	~allocLoopBuf.(track);       // allocate fresh buffer
-
 	var clock      = TempoClock.default;
 	var totalBeats = ~loopLength * ~loopBeatsPerBar;
 	var curBeat    = clock.beats;
@@ -233,6 +227,11 @@ SynthDef(\loopPlay, {
 	var toNext     = if (beatInSet < 0.001, { totalBeats }, { totalBeats - beatInSet });
 	var startBeat  = curBeat + toNext;
 	var endBeat    = startBeat + totalBeats;
+
+	~loopState[track] = \waiting;
+	~updateLoopTrackLED.(track);
+	~stopLoopPlayback.(track);   // stop any existing playback
+	~allocLoopBuf.(track);       // allocate fresh buffer
 
 	"[LOOP] Track % waiting for downbeat in %.2f beats".format(track, toNext).postln;
 
@@ -272,13 +271,16 @@ SynthDef(\loopPlay, {
 
 ~startLoopRecording = { |track|
 	var buf = ~loopBufs[track];
-	if (buf.isNil, { "[LOOP] ERROR: no buffer for track=%".format(track).postln; ^nil });
-	if (~loopRecSynth[track].notNil, { ~loopRecSynth[track].free; ~loopRecSynth[track] = nil; });
-	~loopRecSynth[track] = Synth.after(s, \loopRec, [
-		\buf,      buf.bufnum,
-		\inputBus, ~synthSendBus.index
-	]);
-	"[LOOP] Track % recording started".format(track).postln;
+	if (buf.notNil, {
+		if (~loopRecSynth[track].notNil, { ~loopRecSynth[track].free; ~loopRecSynth[track] = nil; });
+		~loopRecSynth[track] = Synth.after(s, \loopRec, [
+			\buf,      buf.bufnum,
+			\inputBus, ~synthSendBus.index
+		]);
+		"[LOOP] Track % recording started".format(track).postln;
+	}, {
+		"[LOOP] ERROR: no buffer for track=%".format(track).postln;
+	});
 };
 
 ~stopLoopRecording = { |track|
@@ -290,13 +292,14 @@ SynthDef(\loopPlay, {
 
 ~startLoopPlayback = { |track|
 	var buf = ~loopBufs[track];
-	if (buf.isNil, { ^nil });
-	if (~loopPlaySynth[track].notNil, { ~loopPlaySynth[track].free; ~loopPlaySynth[track] = nil; });
-	~loopPlaySynth[track] = Synth(\loopPlay, [
-		\out, ~mainOutBus,
-		\buf, buf.bufnum,
-		\amp, ~loopAmps[track]
-	]);
+	if (buf.notNil, {
+		if (~loopPlaySynth[track].notNil, { ~loopPlaySynth[track].free; ~loopPlaySynth[track] = nil; });
+		~loopPlaySynth[track] = Synth(\loopPlay, [
+			\out, ~mainOutBus,
+			\buf, buf.bufnum,
+			\amp, ~loopAmps[track]
+		]);
+	});
 };
 
 ~stopLoopPlayback = { |track|

@@ -39,37 +39,46 @@
 	~mainClock = TempoClock.new(bpm / 60, 0);
 	~clockBpm  = bpm;
 	"Shared clock started at % BPM".format(bpm).postln;
-
-	~clickRoutine = Routine {
-		var beat = 0;
-		loop {
-			var freq = if (beat == 0, { ~clickDownbeatFreq }, { ~clickSubFreq });
-			// Click goes to IEM bus ONLY — confirmed by hardcoding ~iemOutBus here.
-			// If ~iemOutBus is nil (rare edge case), skip the click rather than crash.
-			if (~iemOutBus.notNil, {
-				Synth(\click, [
-					\out,      ~iemOutBus,
-					\freq,     freq,
-					\duration, ~clickDuration,
-					\amp,      ~clickAmp
-				]);
-			});
-			beat = (beat + 1) % ~clockBeats;
-			1.0.wait;
-		}
-	};
-	~clickRoutine.play(~mainClock);
-	~clickRunning = true;
-	"Click routine started on shared clock.".postln;
+	// Click is NOT started here — it is started on demand
+	// by ~btPlay when a song has no click track of its own.
 };
 
-~stopClock = {
+// ----- Start / stop the metronome click on demand -----
+~startClick = {
+	if (~clickRoutine.isNil, {
+		~clickRoutine = Routine {
+			var beat = 0;
+			loop {
+				var freq = if (beat == 0, { ~clickDownbeatFreq }, { ~clickSubFreq });
+				if (~iemOutBus.notNil, {
+					Synth(\click, [
+						\out,      ~iemOutBus,
+						\freq,     freq,
+						\duration, ~clickDuration,
+						\amp,      ~clickAmp
+					]);
+				});
+				beat = (beat + 1) % ~clockBeats;
+				1.0.wait;
+			}
+		};
+		if (~mainClock.notNil, { ~clickRoutine.play(~mainClock); });
+		~clickRunning = true;
+		"[CLICK] Metronome started".postln;
+	});
+};
+
+~stopClick = {
 	if (~clickRoutine.notNil, {
 		~clickRoutine.stop;
 		~clickRoutine = nil;
 		~clickRunning = false;
-		"Click routine stopped.".postln;
+		"[CLICK] Metronome stopped".postln;
 	});
+};
+
+~stopClock = {
+	~stopClick.();
 	if (~mainClock.notNil, {
 		~mainClock.stop;
 		~mainClock = nil;

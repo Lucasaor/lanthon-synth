@@ -6,8 +6,9 @@
 import fs from 'fs/promises';
 import path from 'path';
 
-// Project root is two levels above web/src/lib/
-const PROJECT_ROOT = path.resolve(import.meta.dirname, '../../../..');
+// Project root is the parent of the web/ directory (WorkingDirectory = web/).
+// Uses process.cwd() so path resolution works in both dev and production builds.
+const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 
 export const CONFIG_DIR   = path.join(PROJECT_ROOT, 'config');
 export const SETLISTS_DIR = path.join(PROJECT_ROOT, 'setlists');

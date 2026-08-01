@@ -1,6 +1,7 @@
 <script>
   export let data;
   let setlists = data.setlists;
+  let mediaFiles = data.media ?? [];
   let editing = null;   // currently edited setlist object
   let newName = '';
 
@@ -8,6 +9,15 @@
     const r = await fetch(`/api/setlists/${name}`);
     editing = await r.json();
     editing._name = name;
+    // Ensure songs have file fields
+    editing.songs = (editing.songs ?? []).map(s => {
+      const song = { vs: '', click: '', dica: '', ...s };
+      return song;
+    });
+    // Auto-fill files for each song
+    for (const song of editing.songs) {
+      autoFillFiles(song);
+    }
   }
 
   async function save() {
@@ -38,7 +48,7 @@
 
   function addSong() {
     editing.songs = [...(editing.songs ?? []),
-      { name: 'New Song', artist: '', tempo: 120 }];
+      { name: 'New Song', artist: '', tempo: 120, vs: '', click: '', dica: '' }];
   }
 
   async function activateSetlist(name) {
@@ -47,6 +57,43 @@
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ address: '/backtrack/load', args: [name] }),
     });
+  }
+
+  /** Filter media files matching a song name for smarter defaults. */
+  function matchingFiles(songName, suffix) {
+    if (!songName) return mediaFiles;
+    const lower = songName.toLowerCase();
+    const matched = mediaFiles.filter(f => f.toLowerCase().includes(lower));
+    const rest = mediaFiles.filter(f => !f.toLowerCase().includes(lower));
+    return [...matched, ...rest];
+  }
+
+  /**
+   * Auto-fill VS/Click/Dica dropdowns based on the song name.
+   * Searches media files for matches like:
+   *   "Song Name (VS).wav"  → VS
+   *   "Song Name (click).wav"  → click
+   *   "Song Name (Dica).wav"  → Dica
+   * Only fills empty fields (doesn't overwrite manual selections).
+   */
+  function autoFillFiles(song) {
+    if (!song?.name) return;
+    const lower = song.name.toLowerCase();
+    const suffixes = ['vs', 'click', 'dica'];
+    const labels  = ['(VS)', '(Click)', '(Dica)', '(click)', '(dica)'];
+
+    for (const f of mediaFiles) {
+      const fLower = f.toLowerCase();
+      if (!fLower.includes(lower)) continue;
+      // Check if this file matches any of our label patterns
+      for (let i = 0; i < labels.length; i++) {
+        const label = labels[i].toLowerCase();
+        if (fLower.includes(label)) {
+          const key = i < 3 ? suffixes[i] : suffixes[i % 3];
+          if (!song[key]) { song[key] = f; }   // only auto-fill empty
+        }
+      }
+    }
   }
 </script>
 
@@ -76,14 +123,39 @@
 {#if editing}
 <div class="card">
   <h2>Editing: {editing._name}</h2>
+  <p style="color:#888; font-size:0.85rem">Upload files via <a href="/files">Files</a> page first, then assign them below.</p>
   {#each (editing.songs ?? []) as song, i}
     <div class="card" style="padding:10px; margin-bottom:8px">
       <div class="row">
         <span style="color:#aaa">#{i+1}</span>
-        <input bind:value={song.name} placeholder="Song name" style="flex:2" />
+        <input bind:value={song.name} placeholder="Song name" style="flex:2"
+          on:input={() => autoFillFiles(song)} />
         <input bind:value={song.artist} placeholder="Artist" style="flex:2" />
         <input type="number" bind:value={song.tempo} placeholder="BPM" style="width:70px; flex:none" />
         <button class="danger" on:click={() => editing.songs.splice(i, 1) && (editing.songs = editing.songs)}>✕</button>
+      </div>
+      <div class="row" style="margin-top:6px; gap:4px; flex-wrap:wrap">
+        <label style="font-size:0.8rem; flex:none; width:36px">VS:</label>
+        <select bind:value={song.vs} style="flex:1; min-width:140px; font-size:0.8rem">
+          <option value="">(auto-detect)</option>
+          {#each matchingFiles(song.name, 'VS') as f}
+            <option value={f}>{f}</option>
+          {/each}
+        </select>
+        <label style="font-size:0.8rem; flex:none; width:36px">Click:</label>
+        <select bind:value={song.click} style="flex:1; min-width:140px; font-size:0.8rem">
+          <option value="">(auto-detect)</option>
+          {#each matchingFiles(song.name, 'click') as f}
+            <option value={f}>{f}</option>
+          {/each}
+        </select>
+        <label style="font-size:0.8rem; flex:none; width:36px">Dica:</label>
+        <select bind:value={song.dica} style="flex:1; min-width:140px; font-size:0.8rem">
+          <option value="">(auto-detect)</option>
+          {#each matchingFiles(song.name, 'Dica') as f}
+            <option value={f}>{f}</option>
+          {/each}
+        </select>
       </div>
     </div>
   {/each}

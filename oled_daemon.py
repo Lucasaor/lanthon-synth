@@ -66,10 +66,16 @@ class DisplayState:
     song_name: str = "—"
     playback_state: str = "STOP"   # "PLAYING" or "STOP"
     bpm: str = "—"
+    sc_online: bool = False        # True when SC heartbeat is recent
+    sc_playing: bool = False       # True when SC reports playback active
     dirty: bool = True             # True = needs re-render
 
 _state = DisplayState()
 _state_lock = threading.Lock()
+
+# Track last SC heartbeat timestamp
+_last_heartbeat = 0.0
+HEARTBEAT_TIMEOUT = 45.0   # seconds before SC is considered offline
 
 def update_state(setlist_name: str, artist: str, song_name: str,
                  playback_state: str, bpm: str) -> None:
@@ -82,6 +88,19 @@ def update_state(setlist_name: str, artist: str, song_name: str,
         _state.bpm            = str(bpm) or "—"
         _state.dirty = True
     log.info("State: %s | %s — %s | %s BPM", playback_state, artist, song_name, bpm)
+
+def handle_heartbeat(online: int, playing: int) -> None:
+    """Receive periodic heartbeat from SC to confirm it's alive."""
+    global _state, _last_heartbeat
+    import time
+    with _state_lock:
+        was_online = _state.sc_online
+        _state.sc_online = (online == 1)
+        _state.sc_playing = (playing == 1)
+        _last_heartbeat = time.monotonic()
+        if _state.sc_online != was_online:
+            _state.dirty = True
+            log.info("SC heartbeat: %s", "ONLINE" if _state.sc_online else "OFFLINE")
 
 # =============================================================================
 # OSC SERVER
@@ -111,6 +130,17 @@ def start_osc_server() -> None:
             log.warning("Bad OSC message: %s", exc)
 
     dispatcher.map("/oled/update", oled_update_handler)
+
+    def heartbeat_handler(address, *args):
+        # /oled/heartbeat <online:int> <playing:int>
+        try:
+            online  = int(args[0]) if len(args) > 0 else 0
+            playing = int(args[1]) if len(args) > 1 else 0
+            handle_heartbeat(online, playing)
+        except Exception:
+            pass
+
+    dispatcher.map("/oled/heartbeat", heartbeat_handler)
 
     # Catch-all for debug
     def default_handler(address, *args):
@@ -172,8 +202,13 @@ def render(device, state: DisplayState) -> None:
         font_sm = ImageFont.load_default()
         font_lg = font_sm
 
-    # Line 1: setlist name
-    draw.text((0, 0),  state.setlist_name[:18], font=font_sm, fill=255)
+    # Line 1: setlist name + SC status indicator (top-right)
+    status_dot = "●" if state.sc_online else "○"
+    setlist_display = state.setlist_name[:15]
+    draw.text((0, 0),  setlist_display, font=font_sm, fill=255)
+    # SC status indicator in top-right corner
+    draw.text((DISPLAY_W - 18, 0), f"SC{status_dot}", font=font_sm,
+              fill=255 if state.sc_online else 128)
     # Line 2: artist
     draw.text((0, 14), state.artist[:18],        font=font_sm, fill=255)
     # Line 3: song name
@@ -193,14 +228,23 @@ def render(device, state: DisplayState) -> None:
 def render_loop(device) -> None:
     """
     Main render loop: re-render whenever state is dirty.
+    Also monitors heartbeat timeout to detect SC going offline.
     Runs in the main thread after OSC server is started.
     """
     import time
+    global _state, _last_heartbeat
     frame_time = 1.0 / REFRESH_HZ
 
     log.info("Render loop started (%.0f fps max)", REFRESH_HZ)
     while True:
+        # Check heartbeat timeout
+        now = time.monotonic()
         with _state_lock:
+            if _state.sc_online and (now - _last_heartbeat) > HEARTBEAT_TIMEOUT:
+                _state.sc_online = False
+                _state.dirty = True
+                log.warning("SC heartbeat lost — marking offline")
+
             if _state.dirty:
                 local_state = DisplayState(
                     setlist_name   = _state.setlist_name,
@@ -208,7 +252,8 @@ def render_loop(device) -> None:
                     song_name      = _state.song_name,
                     playback_state = _state.playback_state,
                     bpm            = _state.bpm,
-                    dirty          = False,
+                    sc_online      = _state.sc_online,
+                    sc_playing     = _state.sc_playing,
                 )
                 _state.dirty = False
             else:

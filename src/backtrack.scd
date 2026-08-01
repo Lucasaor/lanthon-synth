@@ -83,19 +83,23 @@
 		// Use JSONlib for robust parsing (installed by setup.sh).
 		// Falls back to the regex stub if JSONlib is not available.
 		var json;
-		try {
-			json = Json.parse(path);
-		} { |err|
-			"[BT] JSONlib not available — using fallback parser. %".format(err).postln;
+		var jsonClass = \Json.asClass;   // nil when JSONlib is not installed
+		if (jsonClass.notNil, {
+			try { json = jsonClass.parse(path); } { |err| json = nil; };
+		});
+
+		if (json.isNil, {
 			var content = File.use(path, "r", { |f| f.readAllString });
+			"[BT] JSONlib not available — using fallback parser.".postln;
 			json = ~parseSetlistJSON.(content);
-		};
+		});
 
 		~btSetlist = json;
 		~btSongIndex = 0;
 		if (~btSetlist.notNil, {
 			"[BT] Setlist '%' loaded — % songs".format(name,
 				~btSetlist[\songs].size).postln;
+			~writeState.();
 			~oledUpdate.();
 		}, {
 			"[BT] ERROR: could not parse setlist file: %".format(path).postln;
@@ -122,11 +126,17 @@
 		var artist     = ~extractJSON.(entry, "artist");
 		var tempoStr   = ~extractJSON.(entry, "tempo");
 		var tempo      = tempoStr !? { tempoStr.asFloat } ? 120.0;
+		var vsFile     = ~extractJSON.(entry, "vs");
+		var clickFile  = ~extractJSON.(entry, "click");
+		var dicaFile   = ~extractJSON.(entry, "dica");
 
 		songs.add(IdentityDictionary[
 			\name   -> songName,
 			\artist -> artist,
-			\tempo  -> tempo
+			\tempo  -> tempo,
+			\vs     -> vsFile,
+			\click  -> clickFile,
+			\dica   -> dicaFile
 		]);
 	};
 
@@ -153,16 +163,40 @@
 	}, { nil })
 };
 
-// Build file path for a given track type (\vs, \click, \dica)
+// Build file path for a given track type (\vs, \click, \dica).
+// If the song has an explicit file name (set via web UI), use that directly.
+// Otherwise fall back to the naming convention: "<Song Name> (VS).wav" etc.
+// Tries multiple case variants since ffmpeg may preserve original capitalization.
 ~songFilePath = { |song, trackType|
-	var baseName = song[\name] ? "unknown";
-	var suffix = switch(trackType,
-		\vs,    "(VS)",
-		\click, "(click)",
-		\dica,  "(Dica)",
-		""
-	);
-	~mediaDir +/+ "% %.wav".format(baseName, suffix)
+	var explicit = song[trackType];   // e.g. song[\vs], song[\click], song[\dica]
+	if (explicit.notNil and: { explicit.asString != "" }, {
+		// Explicit file path from web UI — just join with media dir
+		~mediaDir +/+ explicit.asString
+	}, {
+		// Fallback: auto-detect by naming convention
+		// Try multiple case variants for the suffix (ffmpeg may preserve caps)
+		var baseName = song[\name] ? "unknown";
+		var suffixes = switch(trackType,
+			\vs,    ["(VS)", "(vs)"],
+			\click, ["(click)", "(Click)", "(click)"],
+			\dica,  ["(Dica)", "(dica)"],
+			[""]
+		);
+		// Also try .mp3 / .aiff extensions
+		var exts = ["wav", "WAV", "mp3", "aiff", "AIFF"];
+		var result = block { |break|
+			suffixes.do { |sfx|
+				exts.do { |ext|
+					var path = ~mediaDir +/+ "%% %.%".format(baseName, sfx, ext);
+					if (File.exists(path), { break.(path); });
+				};
+			};
+			// Return the first (default) path even if it doesn't exist
+			// — ~btPlay will log a warning if missing
+			~mediaDir +/+ "% %.wav".format(baseName, suffixes[0])
+		};
+		result
+	});
 };
 
 // =============================================================================
@@ -177,12 +211,12 @@
 	var song = ~currentSong.();
 	if (song.notNil, {
 		Routine {
-			~btStop.();
-
 			// Open streaming buffers for each track that exists
 			var vsPath    = ~songFilePath.(song, \vs);
 			var clickPath = ~songFilePath.(song, \click);
 			var cuePath   = ~songFilePath.(song, \dica);
+			var hasClick  = File.exists(clickPath);
+			~btStop.();
 
 			// Buffer.cueSoundFile queues the file read on the server —
 			// it does NOT block. We call s.sync to wait for cue completion.
@@ -192,7 +226,7 @@
 			}, {
 				"[BT] WARNING: file not found — %".format(vsPath).postln;
 			});
-			if (File.exists(clickPath), {
+			if (hasClick, {
 				~btClickBuf = Buffer.cueSoundFile(s, clickPath, 0, 2, bufferSize: 32768);
 			}, {
 				"[BT] WARNING: file not found — %".format(clickPath).postln;
@@ -204,6 +238,17 @@
 			});
 
 			s.sync;
+
+			// If the song has its own click track, disable SC metronome click
+			// to avoid double-click (unsynchronized).
+			// If no click track, start the SC metronome for timing reference.
+			("[BT] DEBUG hasClick=%, startClick=%, stopClick=%".format(
+				hasClick, ~startClick.notNil, ~stopClick.notNil)).postln;
+			if (hasClick, {
+				if (~stopClick.notNil, { ~stopClick.(); });
+			}, {
+				if (~startClick.notNil, { ~startClick.(); });
+			});
 
 			// Spawn a Synth for each available buffer
 			if (~btVSBuf.notNil, {
@@ -234,6 +279,7 @@
 			});
 
 			~btPlaying = true;
+			~writeState.();
 			~oledUpdate.();
 			"[BT] PLAYING: % — % @ % BPM".format(
 				song[\name], song[\artist], song[\tempo]).postln;
@@ -254,7 +300,11 @@
 	if (~btClickBuf.notNil, { ~btClickBuf.close; ~btClickBuf.free; ~btClickBuf = nil; });
 	if (~btCueBuf.notNil, { ~btCueBuf.close; ~btCueBuf.free; ~btCueBuf = nil; });
 
+	// Stop SC metronome click when backtrack stops
+	if (~stopClick.notNil, { ~stopClick.(); });
+
 	~btPlaying = false;
+	~writeState.();
 	~oledUpdate.();
 	"[BT] STOPPED".postln;
 };
@@ -267,6 +317,7 @@
 	var wasPlaying = ~btPlaying;
 	~btStop.();
 	~btSongIndex = (~btSongIndex + 1) % max(1, ~btSetlist !? { ~btSetlist[\songs].size } ? 1);
+	~writeState.();
 	~oledUpdate.();
 	if (wasPlaying, { ~btPlay.(); });
 	"[BT] NEXT: index=%".format(~btSongIndex).postln;
@@ -276,6 +327,7 @@
 	var wasPlaying = ~btPlaying;
 	~btStop.();
 	~btSongIndex = (~btSongIndex - 1).max(0);
+	~writeState.();
 	~oledUpdate.();
 	if (wasPlaying, { ~btPlay.(); });
 	"[BT] PREV: index=%".format(~btSongIndex).postln;
@@ -296,6 +348,48 @@
 ~setCueVolume = { |normVal|
 	~btCueVol = normVal;
 	if (~btCueSynth.notNil, { ~btCueSynth.set(\amp, normVal); });
+};
+
+// =============================================================================
+// STATE FILE WRITER (for web UI state tracking)
+// =============================================================================
+// Writes current playback state to config/state.json so the web dashboard
+// can show the current song/artist/playing status without polling SC via OSC.
+// JSON is formatted manually since JSONlib may not be installed on the Pi.
+
+~jsonEscape = { |s|
+	var str = s.asString;
+	str = str.replace("\\", "\\\\");   // escape backslashes first
+	str = str.replace("\"", "\\\"");
+	str = str.replace("\n", "\\n");
+	str = str.replace("\t", "\\t");
+	str;
+};
+
+~writeState = {
+	var song    = ~currentSong.();
+	var setName = ~btSetlist !? { ~btSetlist[\name] } ? "";
+	var name   = song !? { song[\name] } ? "";
+	var artist = song !? { song[\artist] } ? "";
+	var bpm    = song !? { song[\tempo].asInteger } ? 0;
+	var playing = if (~btPlaying, "true", "false");
+	var json;
+	var f;
+
+	json = "{\"activeSetlist\":\"%\",\"songName\":\"%\",\"artist\":\"%\",\"playing\":%, \"bpm\":%}".format(
+		~jsonEscape.(setName),
+		~jsonEscape.(name),
+		~jsonEscape.(artist),
+		playing,
+		bpm
+	);
+
+	// Write to config/state.json in the project root
+	f = File.open((~projectDir +/+ "config/state.json").standardizePath, "w");
+	if (f.notNil, {
+		f.write(json);
+		f.close;
+	});
 };
 
 // =============================================================================

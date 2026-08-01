@@ -68,8 +68,8 @@
     uploading = false;
     input.value = '';  // reset so same file can be re-uploaded
 
-    // Refresh the file lists
-    invalidateAll();
+    // Refresh the file lists — await to ensure load() completes
+    await invalidateAll();
   }
 </script>
 

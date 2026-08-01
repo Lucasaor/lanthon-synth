@@ -110,3 +110,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Node modules
+node_modules/
+
+# SvelteKit build output
+build/
+.svelte-kit/

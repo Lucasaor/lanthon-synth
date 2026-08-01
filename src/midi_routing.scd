@@ -171,6 +171,9 @@
 	// Load SMK25 knob map overrides from config
 	~loadSMKKnobMap.();
 
+	// Register MIDI Learn OSC responders
+	~initMIDILearnOSC.();
+
 	// Start device-watcher (reconnect detection, including BT)
 	~startDeviceWatcher.();
 
@@ -193,8 +196,8 @@
 		// the count stays the same but the device set changes.
 		var lastIDs = MIDIClient.sources.collect(_.uid).asSet;
 		loop {
-			5.0.wait;
 			var currentIDs = MIDIClient.sources.collect(_.uid).asSet;
+			5.0.wait;
 			if (currentIDs != lastIDs, {
 				"[MIDI] Device set changed — re-detecting".postln;
 				try { MIDIClient.init(verbose: false); } { |e| };
@@ -241,47 +244,51 @@
 // Note-off releases the corresponding synth by setting gate=0.
 
 MIDIdef.noteOn(\smk_noteon, { |vel, note, chan, src|
-	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
+	var freq;
+	var args;
+	var anyOscActive;
+	var synth;
+	if ((~srcID_SMK.isNil or: { src != ~srcID_SMK }).not, {
+		freq = note.midicps;
+		args = List[
+			\out,     ~synthSendBus.index,
+			\freq,    freq,
+			\gate,    1,
+			\vel,     vel.linlin(0, 127, 0.01, 1.0),
+			\amp,     ~voiceParams[\amp]     ? 0.5,
+			\cutoff,  ~voiceParams[\cutoff]  ? 4000,
+			\dryWet,  ~voiceParams[\dryWet]  ? 1.0,
+			\attack,  ~voiceParams[\attack]  ? 0.01,
+			\sustain, ~voiceParams[\sustain] ? 0.7,
+			\release, ~voiceParams[\release] ? 0.3
+		];
 
-	var freq = note.midicps;
-	var args = List[
-		\out,     ~synthSendBus.index,
-		\freq,    freq,
-		\gate,    1,
-		\vel,     vel.linlin(0, 127, 0.01, 1.0),
-		\amp,     ~voiceParams[\amp]     ? 0.5,
-		\cutoff,  ~voiceParams[\cutoff]  ? 4000,
-		\dryWet,  ~voiceParams[\dryWet]  ? 1.0,
-		\attack,  ~voiceParams[\attack]  ? 0.01,
-		\sustain, ~voiceParams[\sustain] ? 0.7,
-		\release, ~voiceParams[\release] ? 0.3
-	];
+		// Add current oscillator states from apc_pads.scd
+		if (~colToOscLevel.notNil and: { ~fxPadState.notNil }, {
+			6.do { |col|
+				args.add(~colToOscLevel[col]);
+				args.add(if(~fxPadState[0][col] == \active, 1.0, 0.0));
+				args.add(~colToOctDn[col]);
+				args.add(if(~fxPadState[1][col] == \active, 1.0, 0.0));
+				args.add(~colToOctUp[col]);
+				args.add(if(~fxPadState[2][col] == \active, 1.0, 0.0));
+			}
+		});
 
-	// Add current oscillator states from apc_pads.scd
-	if (~colToOscLevel.notNil and: { ~fxPadState.notNil }, {
-		6.do { |col|
-			args.add(~colToOscLevel[col]);
-			args.add(if(~fxPadState[0][col] == \active, 1.0, 0.0));
-			args.add(~colToOctDn[col]);
-			args.add(if(~fxPadState[1][col] == \active, 1.0, 0.0));
-			args.add(~colToOctUp[col]);
-			args.add(if(~fxPadState[2][col] == \active, 1.0, 0.0));
-		}
-	});
+		// If no oscillator is active, default to saw (musical fallback)
+		anyOscActive = if (~fxPadState.notNil, {
+			6.any { |col| ~fxPadState[0][col] == \active }
+		}, { false });
+		if (anyOscActive.not, { args.add(\sawLevel); args.add(1.0); });
 
-	// If no oscillator is active, default to saw (musical fallback)
-	var anyOscActive = if (~fxPadState.notNil, {
-		6.any { |col| ~fxPadState[0][col] == \active }
-	}, { false });
-	if (anyOscActive.not, { args.add(\sawLevel); args.add(1.0); });
+		synth = Synth(\lanth0nVoice, args.asArray);
+		~lanth0nVoices.add([note, synth]);
 
-	var synth = Synth(\lanth0nVoice, args.asArray);
-	~lanth0nVoices.add([note, synth]);
-
-	// Polyphony cap: free oldest voice if over limit
-	if (~lanth0nVoices.size > 8, {
-		var oldest = ~lanth0nVoices.removeAt(0);
-		if (oldest[1].notNil, { oldest[1].set(\gate, 0); });
+		// Polyphony cap: free oldest voice if over limit
+		if (~lanth0nVoices.size > 8, {
+			var oldest = ~lanth0nVoices.removeAt(0);
+			if (oldest[1].notNil, { oldest[1].set(\gate, 0); });
+		});
 	});
 }, srcID: nil);   // nil srcID = accept from any source; we filter in body
 
@@ -289,46 +296,50 @@ MIDIdef.noteOn(\smk_noteon, { |vel, note, chan, src|
 // Notes from APC Mini in Notes Mode use the same handler logic.
 
 MIDIdef.noteOff(\smk_noteoff, { |vel, note, chan, src|
-	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
-
-	var entry = ~lanth0nVoices.detect { |e| e[0] == note };
-	if (entry.notNil, {
-		~lanth0nVoices.remove(entry);
-		if (entry[1].notNil, { entry[1].set(\gate, 0); });
+	var entry;
+	if ((~srcID_SMK.isNil or: { src != ~srcID_SMK }).not, {
+		entry = ~lanth0nVoices.detect { |e| e[0] == note };
+		if (entry.notNil, {
+			~lanth0nVoices.remove(entry);
+			if (entry[1].notNil, { entry[1].set(\gate, 0); });
+		});
 	});
 }, srcID: nil);
 
 // Pitch bend → update freq on all active voices
 MIDIdef.bend(\smk_bend, { |val, chan, src|
-	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
-	var semis = val.linlin(0, 16383, -2.0, 2.0);
-	~lanth0nVoices.do { |entry|
-		if (entry[1].notNil, {
-			entry[1].set(\freq, entry[0].midicps * (2 ** (semis / 12.0)));
-		})
-	}
+	var semis;
+	if ((~srcID_SMK.isNil or: { src != ~srcID_SMK }).not, {
+		semis = val.linlin(0, 16383, -2.0, 2.0);
+		~lanth0nVoices.do { |entry|
+			if (entry[1].notNil, {
+				entry[1].set(\freq, entry[0].midicps * (2 ** (semis / 12.0)));
+			})
+		}
+	});
 }, srcID: nil);
 
 // SMK25 Mod Wheel (CC 1) → cutoff
 MIDIdef.cc(\smk_mod, { |val, ccNum, chan, src|
-	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
-	if (ccNum == 1, {
-		var cutoff = val.linexp(0, 127, 80.0, 18000.0);
-		~voiceParams[\cutoff] = cutoff;
-		~lanth0nVoices.do { |e| if (e[1].notNil, { e[1].set(\cutoff, cutoff); }); };
+	if ((~srcID_SMK.isNil or: { src != ~srcID_SMK }).not, {
+		if (ccNum == 1, {
+			var cutoff = val.linexp(0, 127, 80.0, 18000.0);
+			~voiceParams[\cutoff] = cutoff;
+			~lanth0nVoices.do { |e| if (e[1].notNil, { e[1].set(\cutoff, cutoff); }); };
+		});
 	});
 }, srcID: nil);
 
 // SMK25 knobs → effect/voice parameters (CC map from ~smkKnobMap)
 MIDIdef.cc(\smk_knobs, { |val, ccNum, chan, src|
-	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
-	if (ccNum == 1, { ^nil });   // Mod Wheel handled above
-
-	var paramSym = ~smkKnobMap[ccNum];
-	if (paramSym.isNil, { ^nil });
-
-	var norm = val / 127.0;
-	switch(paramSym,
+	var paramSym;
+	var norm;
+	if ((~srcID_SMK.isNil or: { src != ~srcID_SMK }).not, {
+		if (ccNum != 1, {   // Mod Wheel handled above
+			paramSym = ~smkKnobMap[ccNum];
+			if (paramSym.notNil, {
+				norm = val / 127.0;
+				switch(paramSym,
 		\lpfCutoff, {
 			if (Ndef(\masterFX).notNil, { Ndef(\masterFX).set(\lpfCutoff, norm); });
 		},
@@ -367,37 +378,44 @@ MIDIdef.cc(\smk_knobs, { |val, ccNum, chan, src|
 			if (Ndef(\masterFX).notNil, { Ndef(\masterFX).set(paramSym, norm); });
 		}
 	);
+			});
+		});
+	});
 }, srcID: nil);
 
 // SMK25 pads → sample playback (same mechanism as Worlde Easypad)
 MIDIdef.noteOn(\smk_pad_on, { |vel, note, chan, src|
-	if (~srcID_SMK.isNil or: { src != ~srcID_SMK }, { ^nil });
-
-	// Only route notes that are mapped as pad notes (not in the melodic range).
-	// ~smkPadNoteMap is populated from config/pads_smk.json.
-	var padIdx = ~smkPadNoteMap[note];
-	if (padIdx.isNil, { ^nil });   // not a pad note; handled by smk_noteon below
-
-	var buf = ~smkPadBuffers[padIdx];
-	if (buf.isNil, {
-		"[SMK] Pad % has no buffer assigned".format(padIdx).postln;
-		^nil
-	});
-	var cfg = ~smkPadConfig[padIdx];
-	var synth = Synth(\sampleVoice, [
-		\out,     ~mainOutBus,
-		\buf,     buf.bufnum,
-		\vel,     vel.linlin(0, 127, 0.01, 1.0),
-		\attack,  cfg[\attack]  ? 0.005,
-		\decay,   cfg[\decay]   ? 0.1,
-		\sustain, cfg[\sustain] ? 0.8,
-		\release, cfg[\release] ? 0.3,
-		\amp,     cfg[\amp]     ? 0.8
-	]);
-	~smkPadVoices[padIdx].add(synth);
-	if (~smkPadVoices[padIdx].size > 4, {
-		var oldest = ~smkPadVoices[padIdx].removeAt(0);
-		if (oldest.notNil, { oldest.free; });
+	var padIdx;
+	var buf;
+	var cfg;
+	var synth;
+	if ((~srcID_SMK.isNil or: { src != ~srcID_SMK }).not, {
+		// Only route notes that are mapped as pad notes (not in the melodic range).
+		// ~smkPadNoteMap is populated from config/pads_smk.json.
+		padIdx = ~smkPadNoteMap[note];
+		if (padIdx.notNil, {   // not a pad note; handled by smk_noteon below
+			buf = ~smkPadBuffers[padIdx];
+			if (buf.notNil, {
+				cfg = ~smkPadConfig[padIdx];
+				synth = Synth(\sampleVoice, [
+					\out,     ~mainOutBus,
+					\buf,     buf.bufnum,
+					\vel,     vel.linlin(0, 127, 0.01, 1.0),
+					\attack,  cfg[\attack]  ? 0.005,
+					\decay,   cfg[\decay]   ? 0.1,
+					\sustain, cfg[\sustain] ? 0.8,
+					\release, cfg[\release] ? 0.3,
+					\amp,     cfg[\amp]     ? 0.8
+				]);
+				~smkPadVoices[padIdx].add(synth);
+				if (~smkPadVoices[padIdx].size > 4, {
+					var oldest = ~smkPadVoices[padIdx].removeAt(0);
+					if (oldest.notNil, { oldest.free; });
+				});
+			}, {
+				"[SMK] Pad % has no buffer assigned".format(padIdx).postln;
+			});
+		});
 	});
 }, srcID: nil);
 
@@ -410,37 +428,39 @@ MIDIdef.noteOn(\smk_pad_on, { |vel, note, chan, src|
 ~easyPadNoteMap = IdentityDictionary.new;  // populated by ~loadEasypadBuffers
 
 MIDIdef.noteOn(\easy_on, { |vel, note, chan, src|
-	if (~srcID_Easy.isNil or: { src != ~srcID_Easy }, { ^nil });
+	var padIdx;
+	var buf;
+	var cfg;
+	var synth;
+	if ((~srcID_Easy.isNil or: { src != ~srcID_Easy }).not, {
+		padIdx = ~easyPadNoteMap[note];
+		if (padIdx.notNil, {
+			buf = ~easyPadBuffers[padIdx];
+			if (buf.notNil, {
+				cfg = ~easyPadConfig[padIdx];
+				synth = Synth(\sampleVoice, [
+					\out,     ~mainOutBus,
+					\buf,     buf.bufnum,
+					\vel,     vel.linlin(0, 127, 0.01, 1.0),
+					\attack,  cfg[\attack]  ? 0.005,
+					\decay,   cfg[\decay]   ? 0.1,
+					\sustain, cfg[\sustain] ? 0.8,
+					\release, cfg[\release] ? 0.3,
+					\amp,     cfg[\amp]     ? 0.8
+				]);
 
-	var padIdx = ~easyPadNoteMap[note];
-	if (padIdx.isNil, {
-		"[EASY] Unmapped note=% — run calibration and set ~easyPadNoteMap".format(note).postln;
-		^nil
-	});
-
-	var buf = ~easyPadBuffers[padIdx];
-	if (buf.isNil, {
-		"[EASY] Pad % has no buffer — assign a sample in the web interface".format(padIdx).postln;
-		^nil
-	});
-
-	var cfg = ~easyPadConfig[padIdx];
-	var synth = Synth(\sampleVoice, [
-		\out,     ~mainOutBus,
-		\buf,     buf.bufnum,
-		\vel,     vel.linlin(0, 127, 0.01, 1.0),
-		\attack,  cfg[\attack]  ? 0.005,
-		\decay,   cfg[\decay]   ? 0.1,
-		\sustain, cfg[\sustain] ? 0.8,
-		\release, cfg[\release] ? 0.3,
-		\amp,     cfg[\amp]     ? 0.8
-	]);
-
-	// Track for per-pad polyphony cap (4 voices per pad)
-	~easyPadVoices[padIdx].add(synth);
-	if (~easyPadVoices[padIdx].size > 4, {
-		var oldest = ~easyPadVoices[padIdx].removeAt(0);
-		if (oldest.notNil, { oldest.free; });
+				// Track for per-pad polyphony cap (4 voices per pad)
+				~easyPadVoices[padIdx].add(synth);
+				if (~easyPadVoices[padIdx].size > 4, {
+					var oldest = ~easyPadVoices[padIdx].removeAt(0);
+					if (oldest.notNil, { oldest.free; });
+				});
+			}, {
+				"[EASY] Pad % has no buffer — assign a sample in the web interface".format(padIdx).postln;
+			});
+		}, {
+			"[EASY] Unmapped note=% — run calibration and set ~easyPadNoteMap".format(note).postln;
+		});
 	});
 }, srcID: nil);
 
@@ -456,38 +476,39 @@ MIDIdef.noteOn(\easy_on, { |vel, note, chan, src|
 ~apcNotesModePC = 99;    // update from calibration
 
 MIDIdef.noteOn(\apc_grid_on, { |vel, note, chan, src|
-	if (~srcID_APC.isNil or: { src != ~srcID_APC }, { ^nil });
-	if (note >= 64, { ^nil });   // control-row notes handled separately
+	if ((~srcID_APC.isNil or: { src != ~srcID_APC }).not, {
+		if (note < 64, {   // control-row notes handled separately
+			if (~apcNotesMode ? false, {
+				// ── Notes Mode: route note to melodic voice ──────────────────────
+				var freq = note.midicps;
+				var args = List[\out, ~synthSendBus.index, \freq, freq, \gate, 1,
+					\vel, vel.linlin(0, 127, 0.01, 1.0)];
+				var synth = Synth(\lanth0nVoice, args.asArray);
+				~apcNotesVoices.add([note, synth]);
 
-	if (~apcNotesMode ? false, {
-		// ── Notes Mode: route note to melodic voice ──────────────────────
-		var freq = note.midicps;
-		var args = List[\out, ~synthSendBus.index, \freq, freq, \gate, 1,
-			\vel, vel.linlin(0, 127, 0.01, 1.0)];
-		var synth = Synth(\lanth0nVoice, args.asArray);
-		~apcNotesVoices.add([note, synth]);
-
-		// Polyphony cap: free oldest APC Notes voice if over 8
-		if (~apcNotesVoices.size > 8, {
-			var oldest = ~apcNotesVoices.removeAt(0);
-			if (oldest[1].notNil, { oldest[1].set(\gate, 0); });
-		});
-	}, {
-		// ── Normal mode: FX pad / PC pad / loop pad / metronome pad ──────
-		var col = note % 8;
-		var row = note.div(8);
-		if (row == 7, {
-			// Metronome / loop-length row
-			if (~onMetronomePadPress.notNil, { ~onMetronomePadPress.(col, row); });
-		}, {
-			if (row == 6, {
-				// Loop track row
-				if (~onLoopPadPress.notNil, { ~onLoopPadPress.(col, row); });
+				// Polyphony cap: free oldest APC Notes voice if over 8
+				if (~apcNotesVoices.size > 8, {
+					var oldest = ~apcNotesVoices.removeAt(0);
+					if (oldest[1].notNil, { oldest[1].set(\gate, 0); });
+				});
 			}, {
-				if (col < 6, {
-					~onFXPadPress.(col, row);
+				// ── Normal mode: FX pad / PC pad / loop pad / metronome pad ──────
+				var col = note % 8;
+				var row = note.div(8);
+				if (row == 7, {
+					// Metronome / loop-length row
+					if (~onMetronomePadPress.notNil, { ~onMetronomePadPress.(col, row); });
 				}, {
-					~onPCPadPress.(col, row);
+					if (row == 6, {
+						// Loop track row
+						if (~onLoopPadPress.notNil, { ~onLoopPadPress.(col, row); });
+					}, {
+						if (col < 6, {
+							~onFXPadPress.(col, row);
+						}, {
+							~onPCPadPress.(col, row);
+						});
+					});
 				});
 			});
 		});
@@ -495,29 +516,30 @@ MIDIdef.noteOn(\apc_grid_on, { |vel, note, chan, src|
 }, srcID: nil);
 
 MIDIdef.noteOff(\apc_grid_off, { |vel, note, chan, src|
-	if (~srcID_APC.isNil or: { src != ~srcID_APC }, { ^nil });
-	if (note >= 64, { ^nil });
-
-	if (~apcNotesMode ? false, {
-		// Release Notes Mode note — search APC pool only
-		var entry = ~apcNotesVoices.detect { |e| e[0] == note };
-		if (entry.notNil, {
-			~apcNotesVoices.remove(entry);
-			if (entry[1].notNil, { entry[1].set(\gate, 0); });
-		});
-	}, {
-		var col = note % 8;
-		var row = note.div(8);
-		if (row == 7, {
-			// Metronome row: no release action needed
-		}, {
-			if (row == 6, {
-				if (~onLoopPadRelease.notNil, { ~onLoopPadRelease.(col, row); });
+	if ((~srcID_APC.isNil or: { src != ~srcID_APC }).not, {
+		if (note < 64, {
+			if (~apcNotesMode ? false, {
+				// Release Notes Mode note — search APC pool only
+				var entry = ~apcNotesVoices.detect { |e| e[0] == note };
+				if (entry.notNil, {
+					~apcNotesVoices.remove(entry);
+					if (entry[1].notNil, { entry[1].set(\gate, 0); });
+				});
 			}, {
-				if (col < 6, {
-					~onFXPadRelease.(col, row);
+				var col = note % 8;
+				var row = note.div(8);
+				if (row == 7, {
+					// Metronome row: no release action needed
 				}, {
-					~onPCPadRelease.(col, row);
+					if (row == 6, {
+						if (~onLoopPadRelease.notNil, { ~onLoopPadRelease.(col, row); });
+					}, {
+						if (col < 6, {
+							~onFXPadRelease.(col, row);
+						}, {
+							~onPCPadRelease.(col, row);
+						});
+					});
 				});
 			});
 		});
@@ -526,12 +548,13 @@ MIDIdef.noteOff(\apc_grid_off, { |vel, note, chan, src|
 
 // Notes Mode toggle via Program Change
 MIDIdef.program(\apc_prog, { |prog, chan, src|
-	if (~srcID_APC.isNil or: { src != ~srcID_APC }, { ^nil });
-	if (prog == ~apcNotesModePC, {
-		if (~apcNotesMode ? false, {
-			~exitNotesMode.();
-		}, {
-			~enterNotesMode.();
+	if ((~srcID_APC.isNil or: { src != ~srcID_APC }).not, {
+		if (prog == ~apcNotesModePC, {
+			if (~apcNotesMode ? false, {
+				~exitNotesMode.();
+			}, {
+				~enterNotesMode.();
+			});
 		});
 	});
 }, srcID: nil);
@@ -541,20 +564,22 @@ MIDIdef.program(\apc_prog, { |prog, chan, src|
 ~apcFaderCCs = [48, 49, 50, 51, 52, 53, 54, 55, 56];  // indices 0-8 → faders 1-9
 
 MIDIdef.cc(\apc_faders, { |val, ccNum, chan, src|
-	if (~srcID_APC.isNil or: { src != ~srcID_APC }, { ^nil });
-
-	var faderIdx = ~apcFaderCCs.indexOf(ccNum);
-	if (faderIdx.notNil, {
-		~onFaderMove.(faderIdx, val);   // defined in apc_pads.scd
+	var faderIdx;
+	if ((~srcID_APC.isNil or: { src != ~srcID_APC }).not, {
+		faderIdx = ~apcFaderCCs.indexOf(ccNum);
+		if (faderIdx.notNil, {
+			~onFaderMove.(faderIdx, val);   // defined in apc_pads.scd
+		});
 	});
 }, srcID: nil);
 
 // Control-row buttons (notes 64-71 on APC Mini, from calibration)
 MIDIdef.noteOn(\apc_ctrl, { |vel, note, chan, src|
-	if (~srcID_APC.isNil or: { src != ~srcID_APC }, { ^nil });
-	if (note >= 64, {
-		"[APC] Control row note=% vel=%".format(note, vel).postln;
-		// Assign specific functions here post-calibration
+	if ((~srcID_APC.isNil or: { src != ~srcID_APC }).not, {
+		if (note >= 64, {
+			"[APC] Control row note=% vel=%".format(note, vel).postln;
+			// Assign specific functions here post-calibration
+		});
 	});
 }, srcID: nil);
 
@@ -566,36 +591,158 @@ MIDIdef.noteOn(\apc_ctrl, { |vel, note, chan, src|
 // Mapping is loaded from config/midi_map.json at startup.
 
 MIDIdef.noteOn(\bt_midi_map, { |vel, note, chan, src|
-	if (~midiActionMap.isNil, { ^nil });
-	var srcMap = ~midiActionMap[src];
-	if (srcMap.isNil, { ^nil });
-	var action = srcMap[("n" ++ note).asSymbol];
-	if (action.notNil and: { vel > 0 }, {
-		switch(action,
-			\btPlay, { ~btPlay.(); },
-			\btStop, { ~btStop.(); },
-			\btNext, { ~btNext.(); },
-			\btPrev, { ~btPrev.(); }
-		)
+	var srcMap;
+	var action;
+	if (~midiActionMap.notNil, {
+		srcMap = ~midiActionMap[src];
+		if (srcMap.notNil, {
+			action = srcMap[("n" ++ note).asSymbol];
+			if (action.notNil and: { vel > 0 }, {
+				switch(action,
+					\btPlay, { ~btPlay.(); },
+					\btStop, { ~btStop.(); },
+					\btNext, { ~btNext.(); },
+					\btPrev, { ~btPrev.(); }
+				)
+			});
+		});
 	});
 }, srcID: nil);
 
 MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
-	if (~midiActionMap.isNil, { ^nil });
-	var srcMap = ~midiActionMap[src];
-	if (srcMap.isNil, { ^nil });
-	var action = srcMap[("cc" ++ ccNum).asSymbol];
-	if (action.notNil and: { val > 63 }, {
-		switch(action,
-			\btPlay, { ~btPlay.(); },
-			\btStop, { ~btStop.(); },
-			\btNext, { ~btNext.(); },
-			\btPrev, { ~btPrev.(); }
-		)
+	var srcMap;
+	var action;
+	if (~midiActionMap.notNil, {
+		srcMap = ~midiActionMap[src];
+		if (srcMap.notNil, {
+			action = srcMap[("cc" ++ ccNum).asSymbol];
+			if (action.notNil and: { val > 63 }, {
+				switch(action,
+					\btPlay, { ~btPlay.(); },
+					\btStop, { ~btStop.(); },
+					\btNext, { ~btNext.(); },
+					\btPrev, { ~btPrev.(); }
+				)
+			});
+		});
 	});
 }, srcID: nil);
 
+	// ── MIDI Learn capture handlers ────────────────────────────────────
+	// Always registered (srcID: nil → matches all controllers).
+	// Only capture and write to file when ~midiLearnActive is true.
+	// These run alongside normal handlers; normal actions still fire
+	// during learn mode (acceptable — you're not performing while learning).
+
+	MIDIdef.noteOn(\midiLearn_note, { |vel, note, chan, src|
+		if (~midiLearnActive, {
+			~midiLearnCaptureNote.(vel, note, chan, src);
+		});
+	}, srcID: nil);
+
+	MIDIdef.cc(\midiLearn_cc, { |val, ccNum, chan, src|
+		if (~midiLearnActive, {
+			~midiLearnCaptureCC.(val, ccNum, chan, src);
+		});
+	}, srcID: nil);
+
 };   // end ~registerHandlers
+
+// =============================================================================
+// MIDI LEARN MODE
+// =============================================================================
+// When active, incoming MIDI note-on and CC messages are captured and written
+// to config/midi_learn.json for the web UI to pick up. Normal MIDI routing
+// is suspended during learn mode.
+//
+// OSC commands:
+//   /midi/learn/start          — enable learn mode
+//   /midi/learn/stop           — disable learn mode (keep last capture)
+//   /midi/learn/cancel         — disable learn mode (discard last capture)
+//   /midi/learn/status         — returns current learn mode state via file
+
+~midiLearnActive = false;
+~midiLearnLastEvent = nil;   // IdentityDictionary with keys: \srcID, \type, \value, \chan
+
+~midiLearnCaptureNote = { |vel, note, chan, src|
+	var ev = IdentityDictionary.new;
+	ev[\srcID] = src;
+	ev[\type]  = "note";
+	ev[\value] = note;
+	ev[\chan]  = chan;
+	ev[\vel]   = vel;   // velocity captured for display
+	~midiLearnLastEvent = ev;
+	~writeMidiLearnFile.(ev);
+	"[MIDI LEARN] Captured note: src=%, note=%, vel=%, chan=%".format(src, note, vel, chan).postln;
+};
+
+~midiLearnCaptureCC = { |val, ccNum, chan, src|
+	var ev = IdentityDictionary.new;
+	ev[\srcID] = src;
+	ev[\type]  = "cc";
+	ev[\value] = ccNum;
+	ev[\chan]  = chan;
+	ev[\ccVal] = val;   // current CC value for display
+	~midiLearnLastEvent = ev;
+	~writeMidiLearnFile.(ev);
+	"[MIDI LEARN] Captured CC: src=%, cc=%, val=%, chan=%".format(src, ccNum, val, chan).postln;
+};
+
+~writeMidiLearnFile = { |ev|
+	var path = (~projectDir +/+ "config/midi_learn.json").standardizePath;
+	var json;
+	var f;
+	// Manual JSON formatting (no JSONlib dependency)
+	json = "{\"srcID\":%, \"type\":\"%\", \"value\":%, \"chan\":%, \"vel\":%, \"ccVal\":%}".format(
+		ev[\srcID] ? -1,
+		ev[\type]  ? "",
+		ev[\value] ? 0,
+		ev[\chan]  ? 0,
+		ev[\vel]   ? 0,
+		ev[\ccVal] ? 0
+	);
+	f = File.open(path, "w");
+	if (f.notNil, { f.write(json); f.close; });
+};
+
+// Register learn-mode OSC responders (called from ~initMIDI)
+~initMIDILearnOSC = {
+	OSCdef(\midiLearnStart, { |msg|
+		var path;
+		var f;
+		~midiLearnActive = true;
+		~midiLearnLastEvent = nil;
+		// Clear the learn file
+		path = (~projectDir +/+ "config/midi_learn.json").standardizePath;
+		f = File.open(path, "w");
+		if (f.notNil, { f.write("{}"); f.close; });
+		"[MIDI LEARN] Mode ON — waiting for MIDI input...".postln;
+	}, "/midi/learn/start");
+
+	OSCdef(\midiLearnStop, { |msg|
+		~midiLearnActive = false;
+		"[MIDI LEARN] Mode OFF — last event preserved".postln;
+	}, "/midi/learn/stop");
+
+	OSCdef(\midiLearnCancel, { |msg|
+		var path;
+		var f;
+		~midiLearnActive = false;
+		~midiLearnLastEvent = nil;
+		path = (~projectDir +/+ "config/midi_learn.json").standardizePath;
+		f = File.open(path, "w");
+		if (f.notNil, { f.write("{}"); f.close; });
+		"[MIDI LEARN] Mode OFF — discarded".postln;
+	}, "/midi/learn/cancel");
+
+	// Reload MIDI action map after web UI saves new mappings
+	OSCdef(\midiReload, {
+		~loadMIDIActionMap.();
+		"[MIDI] Action map reloaded from config".postln;
+	}, "/midi/reload");
+
+	"[MIDI LEARN] OSC responders registered".postln;
+};
 
 // =============================================================================
 // SMK25 PAD BUFFER LOADING
@@ -604,40 +751,43 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 
 ~loadSMKPadBuffers = {
 	var cfgPath = ~projectDir +/+ "config/pads_smk.json";
+	var cfg;
+	var jsonClass = \Json.asClass;   // nil when JSONlib is not installed
 	if (File.exists(cfgPath).not, {
 		"[SMK] No pad config at % — SMK25 pads silent until configured".format(cfgPath).postln;
-		^nil
-	});
-	var cfg;
-	try { cfg = Json.parse(cfgPath); } { |err|
-		"[SMK] JSONlib not available — SMK25 pad config disabled".postln; ^nil
-	};
-	if (cfg.notNil, {
-		var pads = cfg[\pads] ? [];
-		pads.do { |pad|
-			var padIdx = pad[\pad];
-			if (padIdx.notNil and: { padIdx >= 0 } and: { padIdx < 16 }, {
-				var filePath = pad[\file];
-				var note     = pad[\note];
-				if (filePath.notNil and: { filePath.size > 0 }, {
-					var fullPath = ~projectDir +/+ "samples" +/+ filePath;
-					if (File.exists(fullPath), {
-						Buffer.read(s, fullPath, action: { |buf|
-							~smkPadBuffers[padIdx] = buf;
-							"[SMK] Pad % → % loaded".format(padIdx, filePath).postln;
+	}, {
+		if (jsonClass.notNil, {
+			try { cfg = jsonClass.parse(cfgPath); } { |err| cfg = nil; };
+		});
+		if (cfg.isNil, {
+			"[SMK] JSONlib not available — SMK25 pad config disabled".postln;
+		}, {
+			var pads = cfg[\pads] ? [];
+			pads.do { |pad|
+				var padIdx = pad[\pad];
+				if (padIdx.notNil and: { padIdx >= 0 } and: { padIdx < 16 }, {
+					var filePath = pad[\file];
+					var note     = pad[\note];
+					if (filePath.notNil and: { filePath.size > 0 }, {
+						var fullPath = ~projectDir +/+ "samples" +/+ filePath;
+						if (File.exists(fullPath), {
+							Buffer.read(s, fullPath, action: { |buf|
+								~smkPadBuffers[padIdx] = buf;
+								"[SMK] Pad % → % loaded".format(padIdx, filePath).postln;
+							});
+						}, {
+							"[SMK] Sample not found: %".format(fullPath).postln;
 						});
-					}, {
-						"[SMK] Sample not found: %".format(fullPath).postln;
 					});
-				});
-				if (note.notNil, { ~smkPadNoteMap[note] = padIdx; });
-				if (pad[\attack].notNil,  { ~smkPadConfig[padIdx][\attack]  = pad[\attack]; });
-				if (pad[\decay].notNil,   { ~smkPadConfig[padIdx][\decay]   = pad[\decay]; });
-				if (pad[\sustain].notNil, { ~smkPadConfig[padIdx][\sustain] = pad[\sustain]; });
-				if (pad[\release].notNil, { ~smkPadConfig[padIdx][\release] = pad[\release]; });
-				if (pad[\amp].notNil,     { ~smkPadConfig[padIdx][\amp]     = pad[\amp]; });
-			})
-		}
+					if (note.notNil, { ~smkPadNoteMap[note] = padIdx; });
+					if (pad[\attack].notNil,  { ~smkPadConfig[padIdx][\attack]  = pad[\attack]; });
+					if (pad[\decay].notNil,   { ~smkPadConfig[padIdx][\decay]   = pad[\decay]; });
+					if (pad[\sustain].notNil, { ~smkPadConfig[padIdx][\sustain] = pad[\sustain]; });
+					if (pad[\release].notNil, { ~smkPadConfig[padIdx][\release] = pad[\release]; });
+					if (pad[\amp].notNil,     { ~smkPadConfig[padIdx][\amp]     = pad[\amp]; });
+				})
+			}
+		});
 	});
 };
 
@@ -649,48 +799,51 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 
 ~loadEasypadBuffers = {
 	var cfgPath = ~projectDir +/+ "config/pads_worlde.json";
+	var cfg;
+	var jsonClass = \Json.asClass;   // nil when JSONlib is not installed
 	if (File.exists(cfgPath).not, {
 		"[EASY] No pad config file at % — pads will be silent until configured".format(cfgPath).postln;
-		^nil
-	});
+	}, {
+		// Use JSONlib if available; fall back to regex
+		if (jsonClass.notNil, {
+			try { cfg = jsonClass.parse(cfgPath); } { |err| cfg = nil; };
+		});
+		if (cfg.isNil, {
+			var content = File.use(cfgPath, "r", { |f| f.readAllString });
+			"[EASY] JSONlib not available — trying regex fallback".postln;
+			cfg = IdentityDictionary[\pads -> ~parsePadConfigFallback.(content)];
+		});
 
-	// Use JSONlib if available; fall back to regex
-	var cfg;
-	try { cfg = Json.parse(cfgPath); } { |err|
-		"[EASY] JSONlib not available — trying regex fallback".format(err).postln;
-		var content = File.use(cfgPath, "r", { |f| f.readAllString });
-		cfg = IdentityDictionary[\pads -> ~parsePadConfigFallback.(content)];
-	};
-
-	if (cfg.notNil, {
-		var pads = cfg[\pads] ? [];
-		pads.do { |pad|
-			var padIdx = pad[\pad];
-			if (padIdx.notNil and: { padIdx >= 0 } and: { padIdx < 12 }, {
-				var filePath = pad[\file];
-				var note     = pad[\note];
-				if (filePath.notNil and: { filePath.size > 0 }, {
-					var fullPath = ~projectDir +/+ "samples" +/+ filePath;
-					if (File.exists(fullPath), {
-						Buffer.read(s, fullPath, action: { |buf|
-							~easyPadBuffers[padIdx] = buf;
-							"[EASY] Pad % → % loaded".format(padIdx, filePath).postln;
+		if (cfg.notNil, {
+			var pads = cfg[\pads] ? [];
+			pads.do { |pad|
+				var padIdx = pad[\pad];
+				if (padIdx.notNil and: { padIdx >= 0 } and: { padIdx < 12 }, {
+					var filePath = pad[\file];
+					var note     = pad[\note];
+					if (filePath.notNil and: { filePath.size > 0 }, {
+						var fullPath = ~projectDir +/+ "samples" +/+ filePath;
+						if (File.exists(fullPath), {
+							Buffer.read(s, fullPath, action: { |buf|
+								~easyPadBuffers[padIdx] = buf;
+								"[EASY] Pad % → % loaded".format(padIdx, filePath).postln;
+							});
+						}, {
+							"[EASY] Sample not found: %".format(fullPath).postln;
 						});
-					}, {
-						"[EASY] Sample not found: %".format(fullPath).postln;
 					});
-				});
-				if (note.notNil, {
-					~easyPadNoteMap[note] = padIdx;
-				});
-				// Load per-pad ADSR
-				if (pad[\attack].notNil,  { ~easyPadConfig[padIdx][\attack]  = pad[\attack]; });
-				if (pad[\decay].notNil,   { ~easyPadConfig[padIdx][\decay]   = pad[\decay]; });
-				if (pad[\sustain].notNil, { ~easyPadConfig[padIdx][\sustain] = pad[\sustain]; });
-				if (pad[\release].notNil, { ~easyPadConfig[padIdx][\release] = pad[\release]; });
-				if (pad[\amp].notNil,     { ~easyPadConfig[padIdx][\amp]     = pad[\amp]; });
-			})
-		};
+					if (note.notNil, {
+						~easyPadNoteMap[note] = padIdx;
+					});
+					// Load per-pad ADSR
+					if (pad[\attack].notNil,  { ~easyPadConfig[padIdx][\attack]  = pad[\attack]; });
+					if (pad[\decay].notNil,   { ~easyPadConfig[padIdx][\decay]   = pad[\decay]; });
+					if (pad[\sustain].notNil, { ~easyPadConfig[padIdx][\sustain] = pad[\sustain]; });
+					if (pad[\release].notNil, { ~easyPadConfig[padIdx][\release] = pad[\release]; });
+					if (pad[\amp].notNil,     { ~easyPadConfig[padIdx][\amp]     = pad[\amp]; });
+				})
+			}
+		});
 	});
 };
 
@@ -718,23 +871,27 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 
 ~loadSMKKnobMap = {
 	var cfgPath = ~projectDir +/+ "config/midi_map.json";
-	if (File.exists(cfgPath).not, { ^nil });
-	try {
-		var cfg = Json.parse(cfgPath);
-		var knobs = cfg[\smkKnobs];
-		if (knobs.notNil, {
-			knobs.do { |entry|
-				var cc  = entry[\cc];
-				var sym = entry[\param];
-				if (cc.notNil and: { sym.notNil }, {
-					~smkKnobMap[cc.asInteger] = sym.asSymbol;
-				});
-			};
-			"[MIDI] Loaded % SMK25 knob mappings".format(knobs.size).postln;
+	var cfg;
+	var knobs;
+	var jsonClass = \Json.asClass;   // nil when JSONlib is not installed
+	if (File.exists(cfgPath), {
+		if (jsonClass.notNil, {
+			try { cfg = jsonClass.parse(cfgPath); } { |err| cfg = nil; };
 		});
-	} { |err|
-		"[MIDI] Could not load SMK25 knob map: %".format(err).postln;
-	};
+		if (cfg.notNil, {
+			knobs = cfg[\smkKnobs];
+			if (knobs.notNil, {
+				knobs.do { |entry|
+					var cc  = entry[\cc];
+					var sym = entry[\param];
+					if (cc.notNil and: { sym.notNil }, {
+						~smkKnobMap[cc.asInteger] = sym.asSymbol;
+					});
+				};
+				"[MIDI] Loaded % SMK25 knob mappings".format(knobs.size).postln;
+			});
+		});
+	});
 };
 
 // =============================================================================
@@ -745,12 +902,17 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 
 ~loadMIDIActionMap = {
 	var cfgPath = ~projectDir +/+ "config/midi_map.json";
+	var cfg;
+	var mappings;
+	var jsonClass = \Json.asClass;   // nil when JSONlib is not installed
 	~midiActionMap = IdentityDictionary.new;
 	if (File.exists(cfgPath), {
 		// Attempt JSONlib, fall back to empty map
-		try {
-			var cfg = Json.parse(cfgPath);
-			var mappings = cfg[\mappings] ? [];
+		if (jsonClass.notNil, {
+			try { cfg = jsonClass.parse(cfgPath); } { |err| cfg = nil; };
+		});
+		if (cfg.notNil, {
+			mappings = cfg[\mappings] ? [];
 			mappings.do { |m|
 				var srcID   = m[\srcID];
 				var type    = m[\type];
@@ -758,15 +920,15 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 				var action  = m[\action];
 				if (srcID.notNil and: { type.notNil } and: { action.notNil }, {
 					var srcMap = ~midiActionMap[srcID];
-					if (srcMap.isNil, { srcMap = IdentityDictionary.new; ~midiActionMap[srcID] = srcMap; });
 					var key = (type ++ value).asSymbol;
+					if (srcMap.isNil, { srcMap = IdentityDictionary.new; ~midiActionMap[srcID] = srcMap; });
 					srcMap[key] = action.asSymbol;
 				})
 			};
 			"[MIDI] Loaded % backtrack MIDI mappings from %".format(mappings.size, cfgPath).postln;
-		} { |err|
-			"[MIDI] JSONlib not available — backtrack MIDI control disabled: %".format(err).postln;
-		};
+		}, {
+			"[MIDI] JSONlib not available — backtrack MIDI control disabled".postln;
+		});
 	}, {
 		"[MIDI] No MIDI map config found — backtrack MIDI control disabled".postln;
 	});
