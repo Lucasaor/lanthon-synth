@@ -39,7 +39,7 @@ async function saveOneFile(file, targetDir, isMedia) {
     const wavPath = path.join(targetDir, `${baseName}.wav`);
     await writeFile(tmpPath, buffer);
     try {
-      await execAsync(`ffmpeg -y -i "${tmpPath}" -ar 44100 -ac 2 -f wav "${wavPath}"`);
+      await execAsync(`ffmpeg -y -i "${tmpPath}" -ar 48000 -ac 2 -f wav "${wavPath}"`);
       await unlink(tmpPath).catch(() => {});
       savedPath = wavPath;
     } catch (err) {

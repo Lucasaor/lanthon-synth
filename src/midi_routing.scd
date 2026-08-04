@@ -24,14 +24,15 @@
 // Set these from calibration.scd output before the rig goes live.
 // nil = "not yet known or not connected" → handlers silently skip messages.
 
-~srcID_APC    = nil;   // AKAI APC Mini
-~srcID_Easy   = nil;   // Worlde Easypad 12
-~srcID_SMK    = nil;   // M-VAVE SMK 25 (Bluetooth MIDI)
+~srcID_APC       = nil;   // AKAI APC Mini — Control port
+~srcID_APC_Notes = nil;   // AKAI APC Mini — Notes port (chromatic layout)
+~srcID_Easy      = nil;   // Worlde Easypad 12
+~srcID_SMK       = nil;   // M-VAVE SMK 25 (Bluetooth MIDI)
 
 // Expected device name fragments (used by auto-detect to set srcIDs)
-~apcDevName   = "APC";
-~easyDevName  = "Easypad";    // update to match your OS's reported name
-~smkDevName   = "SMK";        // BT MIDI name as seen by the OS
+~apcDevName   = "APC mini mk2";
+~easyDevName  = "WORLDE";     // Worlde Easypad 12 shows as "WORLDE" on Pi
+~smkDevName   = "SMK25";      // BT MIDI name: "SMK25 Bluetooth"
 
 // Backtrack MIDI action map — populated from config/midi_map.json at runtime.
 // Format: IdentityDictionary[ srcID -> IdentityDictionary[ note/CC -> action ] ]
@@ -124,29 +125,42 @@
 	};
 	"".postln;
 
-	// Auto-detect device srcIDs from known name fragments
+	// Auto-detect device srcIDs from known name fragments.
+	// APC Mini has two ports: "Control" (main functions) and "Notes" (key mode).
+	// We prefer the Control port. SMK25 may connect as Bluetooth later.
+	// Sort APC sources by UID ascending: lower UID = Control port, higher = Notes port.
+	{ var apcSrcs = MIDIClient.sources.select({ |src|
+		((src.device ? "") ++ " " ++ (src.name ? "")).toUpper.contains(~apcDevName.toUpper)
+	}).sort({ |a, b| a.uid < b.uid });
+		if (apcSrcs.size >= 1, { ~srcID_APC       = apcSrcs[0].uid; });
+		if (apcSrcs.size >= 2, { ~srcID_APC_Notes = apcSrcs[1].uid; });
+	}.();
 	MIDIClient.sources.do { |src|
 		var dev = (src.device ? "") ++ " " ++ (src.name ? "");
-		if (dev.toUpper.contains(~apcDevName.toUpper),  { ~srcID_APC  = src.uid; });
 		if (dev.toUpper.contains(~easyDevName.toUpper), { ~srcID_Easy = src.uid; });
 		if (dev.toUpper.contains(~smkDevName.toUpper),  { ~srcID_SMK  = src.uid; });
 	};
 
 	// Report detection results
 	if (~srcID_APC.isNil,  { "[MIDI] WARNING: APC Mini not found — APC handlers inactive".postln; },
-		{ "[MIDI] APC Mini detected (srcID=%)".format(~srcID_APC).postln });
+		{ "[MIDI] APC Mini Control detected (srcID=%)".format(~srcID_APC).postln });
+	if (~srcID_APC_Notes.notNil, {
+		"[MIDI] APC Mini Notes port detected (srcID=%)".format(~srcID_APC_Notes).postln;
+	});
 	if (~srcID_Easy.isNil, { "[MIDI] WARNING: Easypad not found — pad triggers inactive".postln; },
 		{ "[MIDI] Easypad detected (srcID=%)".format(~srcID_Easy).postln });
 	if (~srcID_SMK.isNil,  { "[MIDI] WARNING: SMK25 not found — melodic voice inactive".postln; },
 		{ "[MIDI] SMK25 detected (srcID=%)".format(~srcID_SMK).postln });
 
-	// Auto-detect APC Mini MIDI output for LED feedback
+	// Auto-detect APC Mini MIDI output for LED feedback (prefer Control/first port)
 	~apcMidiOut = nil;
 	MIDIClient.destinations.do { |dest, i|
 		var name = ((dest.device ? "") ++ " " ++ (dest.name ? "")).toUpper;
 		if (name.contains(~apcDevName.toUpper), {
-			~apcMidiOut = MIDIOut(i);
-			"[MIDI] APC Mini output found at index % → LED feedback enabled".format(i).postln;
+			if (name.contains("CONTROL") or: { ~apcMidiOut.isNil }, {
+				~apcMidiOut = MIDIOut(i);
+				"[MIDI] APC Mini output found at index % → LED feedback enabled".format(i).postln;
+			});
 		});
 	};
 	if (~apcMidiOut.isNil, {
@@ -178,6 +192,97 @@
 	~startDeviceWatcher.();
 
 	"[MIDI] Initialization complete.".postln;
+
+	// Bridge SMK25 (Bluetooth) at ALSA level if not visible to MIDIClient.
+	~bridgeSMK25.();
+
+	// Start persistent bridge poller (runs even when MIDIClient sources don't change).
+	// Bluetooth devices appear/disappear independently of SC's MIDI enumeration.
+	~startSMKBridgePoller.();
+};
+
+// =============================================================================
+// SMK25 BLUETOOTH BRIDGE — connects SMK25 at ALSA level when MIDIClient can't
+// =============================================================================
+// SMK25 appears as a user-space ALSA client (type=user).  MIDIClient sources
+// sometimes miss these.  We parse `aconnect -l` to find SMK25 and bridge it
+// to a free SuperCollider MIDI input, then re-connect to pick up the srcID.
+
+~bridgeSMK25 = {
+	var pipe; var smkClient; var scClient; var scInPort; var line;
+	// Count existing SC input subscriptions to pick the next free port.
+	pipe = Pipe.new("aconnect -l", "r");
+	if (pipe.isNil, { ^nil });
+	smkClient = nil; scClient = nil; scInPort = 0;
+	line = pipe.getLine;
+	while { line.notNil } {
+		if (line.contains("SuperCollider"), {
+			var m = line.findRegexp("client (\\d+):");
+			if (m.size > 1, { scClient = m[1][1].asInteger; });
+		});
+		if (line.contains("SMK25") or: { line.contains("SMK ") }, {
+			var m = line.findRegexp("client (\\d+):");
+			if (m.size > 1, { smkClient = m[1][1].asInteger; });
+		});
+		// Count lines like "Connected From:" under the SC client block
+		if (line.contains("Connected From:") and: { scClient.notNil }, {
+			scInPort = scInPort + 1;
+		});
+		line = pipe.getLine;
+	};
+	pipe.close;
+	if (smkClient.notNil and: { scClient.notNil }, {
+		// Bridge SMK25 port 0 → SC's next free input (scInPort)
+		var cmd = "aconnect %:0 %:%".format(smkClient, scClient, scInPort);
+		("[SMK] Bridging: " ++ cmd).postln;
+		cmd.unixCmd;
+		// Give ALSA a moment, then re-connect to pick up the new port
+		{ 0.5.wait; MIDIIn.connectAll; }.fork(AppClock);
+		// Re-scan for SMK25 srcID
+		{ 1.0.wait;
+			MIDIClient.sources.do { |src|
+				var dev = (src.device ? "") ++ " " ++ (src.name ? "");
+				if (dev.toUpper.contains("SMK25") or: { dev.toUpper.contains("SMK ") }, {
+					~srcID_SMK = src.uid;
+					"[SMK] Bridge OK — srcID=%".format(src.uid).postln;
+				});
+			};
+		}.fork(AppClock);
+	}, {
+		"[SMK] Bridge skipped — not found in aconnect output".postln;
+	});
+};
+
+// Persistent Bluetooth bridge poller — runs every 10s independently of the
+// device watcher.  SMK25 may appear in ALSA without triggering a
+// MIDIClient.sources change, so we poll aconnect directly.
+~smkBridgePoller = nil;
+
+~startSMKBridgePoller = {
+	if (~smkBridgePoller.notNil, { ~smkBridgePoller.stop; });
+	~smkBridgePoller = Routine {
+		loop {
+			var pipe = Pipe.new("aconnect -l", "r");
+			var found = false;
+			if (pipe.notNil, {
+				var line = pipe.getLine;
+				while { line.notNil } {
+					if (line.contains("SMK25") or: { line.contains("SMK ") }, { found = true; });
+					line = pipe.getLine;
+				};
+				pipe.close;
+			});
+			if (found and: { ~srcID_SMK.isNil }, {
+				"[SMK] Poller: SMK25 found in ALSA — bridging".postln;
+				~bridgeSMK25.();
+			});
+			if (found.not and: { ~srcID_SMK.notNil }, {
+				"[SMK] Poller: SMK25 disconnected — clearing srcID".postln;
+				~srcID_SMK = nil;
+			});
+			10.0.wait;
+		}
+	}.play(AppClock);
 };
 
 // =============================================================================
@@ -202,25 +307,38 @@
 				"[MIDI] Device set changed — re-detecting".postln;
 				try { MIDIClient.init(verbose: false); } { |e| };
 				MIDIIn.connectAll;
-				// Re-detect srcIDs
+				// Re-detect srcIDs (sort by UID: lower = Control, higher = Notes)
+				{ var apcSrcs = MIDIClient.sources.select({ |src|
+					((src.device ? "") ++ " " ++ (src.name ? "")).toUpper.contains(~apcDevName.toUpper)
+				}).sort({ |a, b| a.uid < b.uid });
+					if (apcSrcs.size >= 1, { ~srcID_APC       = apcSrcs[0].uid; });
+					if (apcSrcs.size >= 2, { ~srcID_APC_Notes = apcSrcs[1].uid; });
+				}.();
 				MIDIClient.sources.do { |src|
 					var dev = (src.device ? "") ++ " " ++ (src.name ? "");
-					if (dev.toUpper.contains(~apcDevName.toUpper))  { ~srcID_APC  = src.uid; };
 					if (dev.toUpper.contains(~easyDevName.toUpper)) { ~srcID_Easy = src.uid; };
 					if (dev.toUpper.contains(~smkDevName.toUpper))  { ~srcID_SMK  = src.uid; };
 				};
-				// Re-detect APC output for LEDs
-				MIDIClient.destinations.do { |dest, i|
-					var name = ((dest.device ? "") ++ " " ++ (dest.name ? "")).toUpper;
-					if (name.contains(~apcDevName.toUpper), {
-						~apcMidiOut = MIDIOut(i);
-						"[MIDI] APC Mini output re-detected".postln;
-					});
-				};
+				// Re-detect APC output for LEDs (prefer first/Control port)
+				{ var apcOut = nil;
+					MIDIClient.destinations.do { |dest, i|
+						var name = ((dest.device ? "") ++ " " ++ (dest.name ? "")).toUpper;
+						if (name.contains(~apcDevName.toUpper), {
+							if (name.contains("CONTROL") or: { apcOut.isNil }, {
+								apcOut = MIDIOut(i);
+							});
+						});
+					};
+					if (apcOut.notNil, { ~apcMidiOut = apcOut; "[MIDI] APC Mini output re-detected".postln; });
+				}.();
 				// Refresh LED state after reconnect
 				if (~refreshAllLEDs.notNil, { ~refreshAllLEDs.(); });
 				// Reload buffers if Easypad reconnected
 				if (~srcID_Easy.notNil, { ~loadEasypadBuffers.(); });
+				// Re-register all MIDIdefs (old ones may be stale after MIDIClient.init)
+				~registerHandlers.();
+				// Bridge SMK25 via ALSA if it appeared as a user-space client
+				~bridgeSMK25.();
 				lastIDs = currentIDs;
 			});
 		}
@@ -277,7 +395,7 @@ MIDIdef.noteOn(\smk_noteon, { |vel, note, chan, src|
 
 		// If no oscillator is active, default to saw (musical fallback)
 		anyOscActive = if (~fxPadState.notNil, {
-			6.any { |col| ~fxPadState[0][col] == \active }
+			(0..5).any { |col| ~fxPadState[0][col] == \active }
 		}, { false });
 		if (anyOscActive.not, { args.add(\sawLevel); args.add(1.0); });
 
@@ -476,31 +594,57 @@ MIDIdef.noteOn(\easy_on, { |vel, note, chan, src|
 ~apcNotesModePC = 99;    // update from calibration
 
 MIDIdef.noteOn(\apc_grid_on, { |vel, note, chan, src|
-	if ((~srcID_APC.isNil or: { src != ~srcID_APC }).not, {
+	var fromAPC; var fromAPCNotes;
+	fromAPC      = (~srcID_APC.notNil      and: { src == ~srcID_APC });
+	fromAPCNotes = (~srcID_APC_Notes.notNil and: { src == ~srcID_APC_Notes });
+	if (fromAPC or: { fromAPCNotes }, {
 		if (note < 64, {   // control-row notes handled separately
-			if (~apcNotesMode ? false, {
-				// ── Notes Mode: route note to melodic voice ──────────────────────
-				var freq = note.midicps;
-				var args = List[\out, ~synthSendBus.index, \freq, freq, \gate, 1,
-					\vel, vel.linlin(0, 127, 0.01, 1.0)];
-				var synth = Synth(\lanth0nVoice, args.asArray);
+			if ((~apcNotesMode ? false) or: { fromAPCNotes }, {
+				// ── Notes Mode: route note to melodic voice ──────────────────────────────────────────────────
+				var freq; var args; var anyOscActive; var synth;
+				freq = note.midicps;
+				args = List[
+					\out,     ~synthSendBus.index,
+					\freq,    freq,
+					\gate,    1,
+					\vel,     vel.linlin(0, 127, 0.01, 1.0),
+					\amp,     ~voiceParams[\amp]     ? 0.5,
+					\cutoff,  ~voiceParams[\cutoff]  ? 4000,
+					\dryWet,  ~voiceParams[\dryWet]  ? 1.0,
+					\attack,  ~voiceParams[\attack]  ? 0.01,
+					\sustain, ~voiceParams[\sustain] ? 0.7,
+					\release, ~voiceParams[\release] ? 0.3
+				];
+				if (~colToOscLevel.notNil and: { ~fxPadState.notNil }, {
+					6.do { |col|
+						args.add(~colToOscLevel[col]);
+						args.add(if(~fxPadState[0][col] == \active, 1.0, 0.0));
+						args.add(~colToOctDn[col]);
+						args.add(if(~fxPadState[1][col] == \active, 1.0, 0.0));
+						args.add(~colToOctUp[col]);
+						args.add(if(~fxPadState[2][col] == \active, 1.0, 0.0));
+					}
+				});
+				anyOscActive = if (~fxPadState.notNil, {
+					(0..5).any { |col| ~fxPadState[0][col] == \active }
+				}, { false });
+				if (anyOscActive.not, { args.add(\sawLevel); args.add(1.0); });
+				synth = Synth(\lanth0nVoice, args.asArray);
 				~apcNotesVoices.add([note, synth]);
-
 				// Polyphony cap: free oldest APC Notes voice if over 8
 				if (~apcNotesVoices.size > 8, {
 					var oldest = ~apcNotesVoices.removeAt(0);
 					if (oldest[1].notNil, { oldest[1].set(\gate, 0); });
 				});
 			}, {
-				// ── Normal mode: FX pad / PC pad / loop pad / metronome pad ──────
-				var col = note % 8;
-				var row = note.div(8);
+				// ── Normal mode: FX pad / PC pad / loop pad / metronome pad ──────────────────────────────────────────────────
+				var col; var row;
+				col = note % 8;
+				row = note.div(8);
 				if (row == 7, {
-					// Metronome / loop-length row
 					if (~onMetronomePadPress.notNil, { ~onMetronomePadPress.(col, row); });
 				}, {
 					if (row == 6, {
-						// Loop track row
 						if (~onLoopPadPress.notNil, { ~onLoopPadPress.(col, row); });
 					}, {
 						if (col < 6, {
@@ -516,9 +660,11 @@ MIDIdef.noteOn(\apc_grid_on, { |vel, note, chan, src|
 }, srcID: nil);
 
 MIDIdef.noteOff(\apc_grid_off, { |vel, note, chan, src|
-	if ((~srcID_APC.isNil or: { src != ~srcID_APC }).not, {
+	var fromAPC      = (~srcID_APC.notNil and: { src == ~srcID_APC });
+	var fromAPCNotes = (~srcID_APC_Notes.notNil and: { src == ~srcID_APC_Notes });
+	if (fromAPC or: { fromAPCNotes }, {
 		if (note < 64, {
-			if (~apcNotesMode ? false, {
+			if ((~apcNotesMode ? false) or: { fromAPCNotes }, {
 				// Release Notes Mode note — search APC pool only
 				var entry = ~apcNotesVoices.detect { |e| e[0] == note };
 				if (entry.notNil, {
@@ -584,65 +730,119 @@ MIDIdef.noteOn(\apc_ctrl, { |vel, note, chan, src|
 }, srcID: nil);
 
 // =============================================================================
-// CONFIGURABLE BACKTRACK MIDI MAPPING
+// CONFIGURABLE BACKTRACK MIDI MAPPING (channel-based, not srcID)
 // =============================================================================
-// Catch-all that routes any configured note/CC to a backtrack action.
-// Actions: \btPlay, \btStop, \btNext, \btPrev
-// Mapping is loaded from config/midi_map.json at startup.
+// Catch-all that routes any configured note/CC/PGM to a backtrack action.
+// Key format: "c" ++ chan ++ type ++ value  (e.g. "c0note36", "c0cc48").
+// Channel-based means mappings survive Pi reboots where srcIDs change.
+// Actions: \btPlay, \btStop, \btNext, \btPrev, \btPanic
 
 MIDIdef.noteOn(\bt_midi_map, { |vel, note, chan, src|
-	var srcMap;
-	var action;
-	if (~midiActionMap.notNil, {
-		srcMap = ~midiActionMap[src];
-		if (srcMap.notNil, {
-			action = srcMap[("n" ++ note).asSymbol];
-			if (action.notNil and: { vel > 0 }, {
-				switch(action,
-					\btPlay, { ~btPlay.(); },
-					\btStop, { ~btStop.(); },
-					\btNext, { ~btNext.(); },
-					\btPrev, { ~btPrev.(); }
-				)
-			});
+	var key; var action;
+	if (~midiActionMap.notNil and: { vel > 0 }, {
+		key = ("c" ++ chan ++ "note" ++ note).asSymbol;
+		action = ~midiActionMap[key];
+		if (action.notNil, {
+			switch(action,
+				\btPlay,  { ~btPlay.(); },
+				\btStop,  { ~btStop.(); },
+				\btNext,  { ~btNext.(); },
+				\btPrev,  { ~btPrev.(); },
+				\btPanic, { if (~panicStop.notNil, { ~panicStop.(); }); }
+			)
 		});
 	});
 }, srcID: nil);
 
 MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
-	var srcMap;
-	var action;
-	if (~midiActionMap.notNil, {
-		srcMap = ~midiActionMap[src];
-		if (srcMap.notNil, {
-			action = srcMap[("cc" ++ ccNum).asSymbol];
-			if (action.notNil and: { val > 63 }, {
-				switch(action,
-					\btPlay, { ~btPlay.(); },
-					\btStop, { ~btStop.(); },
-					\btNext, { ~btNext.(); },
-					\btPrev, { ~btPrev.(); }
-				)
-			});
+	var key; var action;
+	if (~midiActionMap.notNil and: { val > 63 }, {
+		key = ("c" ++ chan ++ "cc" ++ ccNum).asSymbol;
+		action = ~midiActionMap[key];
+		if (action.notNil, {
+			switch(action,
+				\btPlay,  { ~btPlay.(); },
+				\btStop,  { ~btStop.(); },
+				\btNext,  { ~btNext.(); },
+				\btPrev,  { ~btPrev.(); },
+				\btPanic, { if (~panicStop.notNil, { ~panicStop.(); }); }
+			)
 		});
 	});
 }, srcID: nil);
 
+// Program change → backtrack action
+MIDIdef.program(\bt_midi_map_pgm, { |progNum, chan, src|
+	var key; var action;
+	if (~midiActionMap.notNil, {
+		key = ("c" ++ chan ++ "pgm" ++ progNum).asSymbol;
+		action = ~midiActionMap[key];
+		if (action.notNil, {
+			switch(action,
+				\btPlay,  { ~btPlay.(); },
+				\btStop,  { ~btStop.(); },
+				\btNext,  { ~btNext.(); },
+				\btPrev,  { ~btPrev.(); },
+				\btPanic, { if (~panicStop.notNil, { ~panicStop.(); }); }
+			)
+		});
+	});
+}, srcID: nil);
+
+// Generic action dispatcher (reused by all MIDIdef variants)
+~dispatchMIDIAction = { |action|
+	switch(action,
+		\btPlay, { ~btPlay.(); },
+		\btStop, { ~btStop.(); },
+		\btNext, { ~btNext.(); },
+		\btPrev, { ~btPrev.(); },
+		\btPanic, { if (~panicStop.notNil, { ~panicStop.(); }); }
+	)
+};
+
 	// ── MIDI Learn capture handlers ────────────────────────────────────
-	// Always registered (srcID: nil → matches all controllers).
+	// Always registered (srcID: nil → matches all controllers, any device).
 	// Only capture and write to file when ~midiLearnActive is true.
 	// These run alongside normal handlers; normal actions still fire
 	// during learn mode (acceptable — you're not performing while learning).
+	//
+	// Supported types: note, cc, pgm (program change), bend (pitch bend),
+	// touch (channel aftertouch), polyTouch (poly aftertouch).
 
 	MIDIdef.noteOn(\midiLearn_note, { |vel, note, chan, src|
 		if (~midiLearnActive, {
-			~midiLearnCaptureNote.(vel, note, chan, src);
+			~midiLearnCapture.(vel, note, chan, src, \note);
 		});
 	}, srcID: nil);
 
 	MIDIdef.cc(\midiLearn_cc, { |val, ccNum, chan, src|
 		if (~midiLearnActive, {
-			~midiLearnCaptureCC.(val, ccNum, chan, src);
+			~midiLearnCapture.(val, ccNum, chan, src, \cc);
+		});
+	}, srcID: nil);
+
+	MIDIdef.program(\midiLearn_pgm, { |progNum, chan, src|
+		if (~midiLearnActive, {
+			~midiLearnCapture.(0, progNum, chan, src, \pgm);
+		});
+	}, srcID: nil);
+
+	MIDIdef.bend(\midiLearn_bend, { |bendVal, chan, src|
+		if (~midiLearnActive, {
+			~midiLearnCapture.(bendVal, 0, chan, src, \bend);
+		});
+	}, srcID: nil);
+
+	MIDIdef.touch(\midiLearn_touch, { |pressure, chan, src|
+		if (~midiLearnActive, {
+			~midiLearnCapture.(pressure, 0, chan, src, \touch);
+		});
+	}, srcID: nil);
+
+	// SysEx: capture raw data as hex string
+	MIDIdef.sysex(\midiLearn_sysex, { |data, src|
+		if (~midiLearnActive, {
+			~midiLearnCaptureSysex.(data, src);
 		});
 	}, srcID: nil);
 
@@ -651,41 +851,59 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 // =============================================================================
 // MIDI LEARN MODE
 // =============================================================================
-// When active, incoming MIDI note-on and CC messages are captured and written
-// to config/midi_learn.json for the web UI to pick up. Normal MIDI routing
-// is suspended during learn mode.
+// When active, incoming MIDI messages of ALL types (note, CC, program change,
+// pitch bend, aftertouch, SysEx) are captured from ANY connected device and
+// written to config/midi_learn.json for the web UI to pick up.
 //
 // OSC commands:
 //   /midi/learn/start          — enable learn mode
 //   /midi/learn/stop           — disable learn mode (keep last capture)
 //   /midi/learn/cancel         — disable learn mode (discard last capture)
-//   /midi/learn/status         — returns current learn mode state via file
 
 ~midiLearnActive = false;
-~midiLearnLastEvent = nil;   // IdentityDictionary with keys: \srcID, \type, \value, \chan
+~midiLearnLastEvent = nil;
 
-~midiLearnCaptureNote = { |vel, note, chan, src|
+// Unified capture for standard MIDI messages (note, cc, pgm, bend, touch, polyTouch)
+~midiLearnCapture = { |val1, val2, chan, src, type|
 	var ev = IdentityDictionary.new;
-	ev[\srcID] = src;
-	ev[\type]  = "note";
-	ev[\value] = note;
 	ev[\chan]  = chan;
-	ev[\vel]   = vel;   // velocity captured for display
+	ev[\type]  = type.asString;
+	if (type == \bend, {
+		// Pitch bend: val1 is the 14-bit value (-8192..8191)
+		ev[\value] = 0;            // no note/cc number for bend
+		ev[\bendVal] = val1;
+	}, {
+		if (type == \touch or: { type == \polyTouch }, {
+			ev[\value] = val2;      // note number (0 for channel touch)
+			ev[\pressure] = val1;
+		}, {
+			ev[\value] = val2;      // note number / CC number / program number
+			ev[\vel]    = val1;     // velocity / CC value / (unused for pgm)
+		});
+	});
 	~midiLearnLastEvent = ev;
 	~writeMidiLearnFile.(ev);
-	"[MIDI LEARN] Captured note: src=%, note=%, vel=%, chan=%".format(src, note, vel, chan).postln;
+	~midiLearnActive = false;   // single-shot: stop after first event
+	"[MIDI LEARN] Captured %: val=%, chan=%".format(type, val2, chan).postln;
 };
 
-~midiLearnCaptureCC = { |val, ccNum, chan, src|
+// SysEx capture — store raw bytes as a hex string
+~midiLearnCaptureSysex = { |data, src|
 	var ev = IdentityDictionary.new;
+	var hexStr = "";
 	ev[\srcID] = src;
-	ev[\type]  = "cc";
-	ev[\value] = ccNum;
-	ev[\chan]  = chan;
-	ev[\ccVal] = val;   // current CC value for display
+	ev[\type]  = "sysex";
+	ev[\value] = 0;
+	ev[\chan]  = 0;
+	data.do { |byte, i|
+		hexStr = hexStr ++ byte.asHexString(2);
+		if (i < (data.size - 1), { hexStr = hexStr ++ " "; });
+	};
+	ev[\sysexData] = hexStr;
 	~midiLearnLastEvent = ev;
 	~writeMidiLearnFile.(ev);
-	"[MIDI LEARN] Captured CC: src=%, cc=%, val=%, chan=%".format(src, ccNum, val, chan).postln;
+	~midiLearnActive = false;   // single-shot: stop after first event
+	"[MIDI LEARN] Captured SysEx: src=%, len=% bytes".format(src, data.size).postln;
 };
 
 ~writeMidiLearnFile = { |ev|
@@ -693,13 +911,12 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 	var json;
 	var f;
 	// Manual JSON formatting (no JSONlib dependency)
-	json = "{\"srcID\":%, \"type\":\"%\", \"value\":%, \"chan\":%, \"vel\":%, \"ccVal\":%}".format(
-		ev[\srcID] ? -1,
-		ev[\type]  ? "",
-		ev[\value] ? 0,
-		ev[\chan]  ? 0,
-		ev[\vel]   ? 0,
-		ev[\ccVal] ? 0
+	json = "{\"chan\":%, \"type\":\"%\", \"value\":%, \"vel\":%, \"sysexData\":\"%\"}".format(
+		ev[\chan]     ? 0,
+		ev[\type]     ? "",
+		ev[\value]    ? 0,
+		ev[\vel]      ? 0,
+		ev[\sysexData] ? ""
 	);
 	f = File.open(path, "w");
 	if (f.notNil, { f.write(json); f.close; });
@@ -907,27 +1124,51 @@ MIDIdef.cc(\bt_midi_map_cc, { |val, ccNum, chan, src|
 	var jsonClass = \Json.asClass;   // nil when JSONlib is not installed
 	~midiActionMap = IdentityDictionary.new;
 	if (File.exists(cfgPath), {
-		// Attempt JSONlib, fall back to empty map
+		// Attempt JSONlib
 		if (jsonClass.notNil, {
 			try { cfg = jsonClass.parse(cfgPath); } { |err| cfg = nil; };
+		});
+		// Regex fallback when JSONlib unavailable
+		if (cfg.isNil, {
+			var content = File.use(cfgPath, "r", { |f| f.readAllString });
+			if (content.notNil, {
+				var items = List.new;
+				content.findRegexp("\\{[^{}]+\\}").do { |match|
+					var obj = match[1];
+					var ch  = obj.findRegexp("\"chan\"\\s*:\\s*(-?\\d+)");
+					var typ  = obj.findRegexp("\"type\"\\s*:\\s*\"([^\"]+)\"");
+					var val  = obj.findRegexp("\"value\"\\s*:\\s*(\\d+)");
+					var act  = obj.findRegexp("\"action\"\\s*:\\s*\"([^\"]+)\"");
+					if (ch.size > 1 and: { typ.size > 1 } and: { val.size > 1 } and: { act.size > 1 }, {
+						items.add(IdentityDictionary[
+							\chan   -> ch[1][1].asInteger,
+							\type   -> typ[1][1],
+							\value  -> val[1][1].asInteger,
+							\action -> act[1][1]
+						]);
+					});
+				};
+				cfg = IdentityDictionary[\mappings -> items.asArray];
+				"[MIDI] Loaded midi_map.json via regex fallback".postln;
+			});
 		});
 		if (cfg.notNil, {
 			mappings = cfg[\mappings] ? [];
 			mappings.do { |m|
-				var srcID   = m[\srcID];
-				var type    = m[\type];
-				var value   = m[\value];
-				var action  = m[\action];
-				if (srcID.notNil and: { type.notNil } and: { action.notNil }, {
-					var srcMap = ~midiActionMap[srcID];
-					var key = (type ++ value).asSymbol;
-					if (srcMap.isNil, { srcMap = IdentityDictionary.new; ~midiActionMap[srcID] = srcMap; });
-					srcMap[key] = action.asSymbol;
+				var chan   = m[\chan];
+				var type   = m[\type];
+				var value  = m[\value];
+				var action = m[\action];
+				if (chan.notNil and: { type.notNil } and: { action.notNil }, {
+					var key;
+					// Flat key: c<chan>n<value> or c<chan>cc<value> etc.
+					key = ("c" ++ chan ++ type ++ value).asSymbol;
+					~midiActionMap[key] = action.asSymbol;
 				})
 			};
-			"[MIDI] Loaded % backtrack MIDI mappings from %".format(mappings.size, cfgPath).postln;
+			"[MIDI] Loaded % backtrack MIDI mappings".format(mappings.size).postln;
 		}, {
-			"[MIDI] JSONlib not available — backtrack MIDI control disabled".postln;
+			"[MIDI] No parseable MIDI map found — backtrack MIDI control disabled".postln;
 		});
 	}, {
 		"[MIDI] No MIDI map config found — backtrack MIDI control disabled".postln;

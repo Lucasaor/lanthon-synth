@@ -22,17 +22,31 @@
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'start' }),
     });
-    // Poll for captured event every 300ms
+    // Poll for captured event every 300ms; auto-stop once an event arrives
     learnPoll = setInterval(async () => {
       try {
         const r = await fetch('/api/midi/learn');
         if (r.ok) {
           const d = await r.json();
-          if (d.event && d.event.srcID !== undefined && d.event.value !== undefined && d.event.srcID !== -1) {
+          if (d.event && d.event.chan !== undefined && d.event.value !== undefined) {
             capturedEvent = d.event;
-            status = 'Captured: ' + (d.event.type === 'note' ? 'Note' : 'CC') + ' ' + d.event.value +
-              (d.event.type === 'note' ? ' (velocity ' + d.event.vel + ')' : ' (value ' + d.event.ccVal + ')') +
-              ' on channel ' + d.event.chan + ', srcID ' + d.event.srcID;
+            // Build status line for all MIDI event types
+            const t = d.event.type ?? 'unknown';
+            let detail = '';
+            if (t === 'note')  detail = ' (vel: ' + d.event.vel + ')';
+            else if (t === 'cc')   detail = ' (val: ' + d.event.ccVal + ')';
+            else if (t === 'pgm')  detail = ' (PC)';
+            else if (t === 'bend') detail = ' (pitch bend)';
+            else if (t === 'sysex') detail = ' (' + d.event.sysexData + ')';
+            status = 'Captured: ' + t.toUpperCase() + ' ' + d.event.value + detail +
+              '  ch:' + d.event.chan;
+            // Single-shot: SC already deactivated; confirm and stop polling
+            if (learnPoll) { clearInterval(learnPoll); learnPoll = null; }
+            learnActive = false;
+            fetch('/api/midi/learn', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ action: 'stop' }),
+            }).catch(() => {});
           }
         }
       } catch {}
@@ -66,7 +80,7 @@
   async function saveMapping(replaceExisting = false) {
     if (!capturedEvent) return;
     const mapping = {
-      srcID:  capturedEvent.srcID,
+      chan:   capturedEvent.chan,
       type:   capturedEvent.type,
       value:  capturedEvent.value,
       action: selectedAction,
@@ -182,7 +196,7 @@ The system will capture the message and let you assign it to a backtrack action.
         <span style="font-weight:bold; width:120px">
           {actions.find(a => a.value === m.action)?.label ?? m.action}
         </span>
-        <span style="color:#888; font-size:0.8rem">srcID: {m.srcID}</span>
+        <span style="color:#888; font-size:0.8rem">ch: {m.chan}</span>
         <button class="danger" style="margin-left:auto; padding:2px 8px"
           on:click={() => deleteMapping(i)}>✕</button>
       </div>

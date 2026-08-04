@@ -101,6 +101,8 @@ s.waitForBoot({
 	"[BOOT] Loading midi_routing.scd...".postln;
 	thisProcess.interpreter.executeFile(~projectDir +/+ "src/midi_routing.scd");
 	~initMIDI.();
+	// Refresh LEDs now that ~apcMidiOut is set (initAPCPads ran before MIDI init)
+	if (~refreshAllLEDs.notNil, { ~refreshAllLEDs.(); });
 	"  MIDI routing active.".postln;
 
 	// ── CPU monitor + server health + OLED heartbeat (every 30s) ──────────

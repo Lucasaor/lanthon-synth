@@ -99,6 +99,12 @@
 		if (~btSetlist.notNil, {
 			"[BT] Setlist '%' loaded — % songs".format(name,
 				~btSetlist[\songs].size).postln;
+			// Persist last loaded setlist for auto-load on next boot
+			{
+				var lastPath = ~projectDir +/+ "config/last_setlist.txt";
+				var f = File.open(lastPath, "w");
+				if (f.notNil, { f.write(name); f.close; });
+			}.();
 			~writeState.();
 			~oledUpdate.();
 		}, {
@@ -216,22 +222,52 @@
 			var clickPath = ~songFilePath.(song, \click);
 			var cuePath   = ~songFilePath.(song, \dica);
 			var hasClick  = File.exists(clickPath);
+			// Rate correction: file may differ from server (48kHz); SoundFile reads metadata only.
+			var vsRate    = 1.0;
+			var clickRate = 1.0;
+			var cueRate   = 1.0;
 			~btStop.();
 
-			// Buffer.cueSoundFile queues the file read on the server —
-			// it does NOT block. We call s.sync to wait for cue completion.
-			// This is safe because we are inside a Routine.
+			// Read WAV header rate: bytes 24-27 little-endian uint32.
+			// Var must be at top of block (SC executeFile rule #2).
 			if (File.exists(vsPath), {
+				var f; var b0; var b1; var b2; var b3; var sr;
+				f = File.open(vsPath, "r");
+				if (f.notNil, {
+					f.seek(24);
+					b0 = f.getChar; b1 = f.getChar; b2 = f.getChar; b3 = f.getChar;
+					f.close;
+					sr = (b3.asInteger << 24) | (b2.asInteger << 16) | (b1.asInteger << 8) | b0.asInteger;
+					if (sr > 0, { vsRate = sr / s.sampleRate; "[BT] File SR=%, server=%, rate=%".format(sr, s.sampleRate, vsRate.round(0.001)).postln; });
+				});
 				~btVSBuf = Buffer.cueSoundFile(s, vsPath, 0, 2, bufferSize: 32768);
 			}, {
 				"[BT] WARNING: file not found — %".format(vsPath).postln;
 			});
 			if (hasClick, {
+				var f; var b0; var b1; var b2; var b3; var sr;
+				f = File.open(clickPath, "r");
+				if (f.notNil, {
+					f.seek(24);
+					b0 = f.getChar; b1 = f.getChar; b2 = f.getChar; b3 = f.getChar;
+					f.close;
+					sr = (b3.asInteger << 24) | (b2.asInteger << 16) | (b1.asInteger << 8) | b0.asInteger;
+					if (sr > 0, { clickRate = sr / s.sampleRate; });
+				});
 				~btClickBuf = Buffer.cueSoundFile(s, clickPath, 0, 2, bufferSize: 32768);
 			}, {
 				"[BT] WARNING: file not found — %".format(clickPath).postln;
 			});
 			if (File.exists(cuePath), {
+				var f; var b0; var b1; var b2; var b3; var sr;
+				f = File.open(cuePath, "r");
+				if (f.notNil, {
+					f.seek(24);
+					b0 = f.getChar; b1 = f.getChar; b2 = f.getChar; b3 = f.getChar;
+					f.close;
+					sr = (b3.asInteger << 24) | (b2.asInteger << 16) | (b1.asInteger << 8) | b0.asInteger;
+					if (sr > 0, { cueRate = sr / s.sampleRate; });
+				});
 				~btCueBuf = Buffer.cueSoundFile(s, cuePath, 0, 2, bufferSize: 32768);
 			}, {
 				"[BT] WARNING: file not found — %".format(cuePath).postln;
@@ -250,26 +286,32 @@
 				if (~startClick.notNil, { ~startClick.(); });
 			});
 
-			// Spawn a Synth for each available buffer
+			// Spawn a Synth for each available buffer.  Apply rate correction
+			// so that files recorded at a different sample rate play at correct pitch.
+			"[BT] Rate correction: vs=%, click=%, cue=%".format(
+				vsRate.round(0.001), clickRate.round(0.001), cueRate.round(0.001)).postln;
 			if (~btVSBuf.notNil, {
 				~btVSSynth = Synth(\backtrackVS, [
 					\out, ~mainOutBus,
 					\buf, ~btVSBuf.bufnum,
-					\amp, ~btVSVol
+					\amp, ~btVSVol,
+					\rate, vsRate
 				]);
 			});
 			if (~btClickBuf.notNil, {
 				~btClickSynth = Synth(\backtrackIEM, [
 					\out, ~iemOutBus,
 					\buf, ~btClickBuf.bufnum,
-					\amp, ~btClickVol
+					\amp, ~btClickVol,
+					\rate, clickRate
 				]);
 			});
 			if (~btCueBuf.notNil, {
 				~btCueSynth = Synth(\backtrackIEM, [
 					\out, ~iemOutBus,
 					\buf, ~btCueBuf.bufnum,
-					\amp, ~btCueVol
+					\amp, ~btCueVol,
+					\rate, cueRate
 				]);
 			});
 
@@ -464,6 +506,19 @@
 
 	// Register OSC responders
 	~initBacktrackOSC.();
+
+	// Auto-load the last used setlist (persisted in config/last_setlist.txt)
+	{
+		var lastPath = ~projectDir +/+ "config/last_setlist.txt";
+		if (File.exists(lastPath), {
+			var name = File.use(lastPath, "r", { |f| f.readAllString });
+			if (name.notNil and: { name.size > 0 }, {
+				name = name.stripWhiteSpace;
+				"[BT] Auto-loading last setlist: %".format(name).postln;
+				~loadSetlist.(name);
+			});
+		});
+	}.();
 
 	~oledUpdate.();
 	"Backtrack engine initialized.".postln;

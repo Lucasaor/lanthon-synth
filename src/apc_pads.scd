@@ -110,9 +110,9 @@
 
 	// Apply to both SMK25 and APC Notes Mode voice pools
 	if (~lanth0nVoices.notNil, {
-		~lanth0nVoices.do { |synth|
-			if (synth.notNil, {
-				synth.set(*args.asArray);
+		~lanth0nVoices.do { |entry|
+			if (entry[1].notNil, {
+				entry[1].set(*args.asArray);
 			})
 		}
 	});
@@ -134,7 +134,7 @@
 	var activeKey = ~rowToActiveKey[row];
 	if (activeKey.notNil, {
 		// Check if ANY pad in this row is active
-		var anyActive = 6.detect({ |col| ~fxPadState[row][col] == \active });
+		var anyActive = (0..5).detect({ |col| ~fxPadState[row][col] == \active });
 		Ndef(\masterFX).set(activeKey, if(anyActive.notNil, 1, 0));
 	});
 };

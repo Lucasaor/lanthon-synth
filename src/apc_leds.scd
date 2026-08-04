@@ -186,8 +186,6 @@
 	~refreshFXPadLEDs.();
 	~refreshPCPadLEDs.();
 	~refreshLoopTrackLEDs.();
-	// Metronome row is managed by the metronome routine in loops.scd;
-	// reinit to dim yellow so it’s not blank after Notes Mode exit.
 	~initMetronomeRow.();
 };
 

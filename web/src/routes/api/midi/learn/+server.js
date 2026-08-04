@@ -22,9 +22,9 @@ async function readLearnEvent() {
   try {
     const raw = await fs.readFile(path.join(CONFIG_DIR, LEARN_FILE), 'utf-8');
     const data = JSON.parse(raw);
-    // If empty object ({}), no event yet
-    if (data.srcID === undefined || data.srcID === null) return null;
-    if (data.srcID === -1) return null;
+    // If empty object ({}), no event yet. Check for channel field (new format).
+    if (data.chan === undefined || data.chan === null) return null;
+    if (data.value === undefined) return null;
     return data;
   } catch {
     return null;
@@ -62,37 +62,20 @@ export async function POST({ request }) {
     const map = await readConfig(MAP_FILE) ?? { mappings: [] };
     const mappings = map.mappings ?? [];
 
-    // Check for conflicts: same srcID + type + value already mapped
+    // Only check for channel-level conflict: same chan + type + value already mapped.
     const conflictIdx = mappings.findIndex(
       (existing) =>
-        existing.srcID === m.srcID &&
+        existing.chan === m.chan &&
         existing.type === m.type &&
         existing.value === m.value
     );
 
-    // Check if the action is already mapped elsewhere (duplicate action)
-    const actionConflict = mappings.find(
-      (existing) =>
-        existing.action === m.action &&
-        !(existing.srcID === m.srcID && existing.type === m.type && existing.value === m.value)
-    );
-
     if (body.replace === true) {
-      // Remove conflicting mapping
       if (conflictIdx >= 0) {
-        const replaced = mappings[conflictIdx];
         mappings.splice(conflictIdx, 1);
-        // Also remove any other mapping with the same action (disable old)
-        for (let i = mappings.length - 1; i >= 0; i--) {
-          if (mappings[i].action === m.action) {
-            mappings.splice(i, 1);
-          }
-        }
       }
-      // Add new mapping
-      mappings.push({ srcID: m.srcID, type: m.type, value: m.value, action: m.action });
+      mappings.push({ chan: m.chan, type: m.type, value: m.value, action: m.action });
     } else {
-      // Check for conflicts
       if (conflictIdx >= 0) {
         return json({
           ok: false,
@@ -101,16 +84,7 @@ export async function POST({ request }) {
           message: `This MIDI key is already mapped to "${mappings[conflictIdx].action}". Replace it?`
         });
       }
-      if (actionConflict) {
-        return json({
-          ok: false,
-          conflict: true,
-          existing: actionConflict,
-          message: `Action "${m.action}" is already mapped to ${actionConflict.type} ${actionConflict.value}. Replace it?`
-        });
-      }
-      // No conflicts — add
-      mappings.push({ srcID: m.srcID, type: m.type, value: m.value, action: m.action });
+      mappings.push({ chan: m.chan, type: m.type, value: m.value, action: m.action });
     }
 
     map.mappings = mappings;
