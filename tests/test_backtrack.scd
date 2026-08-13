@@ -26,6 +26,7 @@ var assert = { |label, cond|
 "=== Backtrack Engine Tests ===".postln;
 
 s.waitForBoot({
+	var song, threw, testVS;
 	// Load required modules
 	thisProcess.interpreter.executeFile(projectDir +/+ "src/synths.scd");
 	s.sync;
@@ -50,10 +51,25 @@ s.waitForBoot({
 	);
 
 	// ── Test 2: Current song returns the first song ───────────────────────
-	var song = ~currentSong.();
+	song = ~currentSong.();
 	assert.("~currentSong returns a song dictionary", song.notNil);
 	assert.("Song has a 'name' key", song !? { song[\name].notNil } ? false);
-	assert.("Song has a 'tempo' key", song !? { song[\tempo].notNil } ? false);
+	assert.("Song has a 'tuning' key", song !? { song[\tuning].notNil } ? false);
+	assert.("Song has a 'key' key", song !? { song[\key].notNil } ? false);
+	assert.("Tuning label formats correctly",
+		~tuningLabel.(IdentityDictionary[\tuning -> "drop", \key -> "D"]) == "Drop D"
+	);
+
+	// ── Test 2b: Optional VS/Dica tracks ─────────────────────────────────
+	assert.("~songFilePath returns nil for missing optional VS track",
+		~songFilePath.(IdentityDictionary[\name -> "No Such Song", \vs -> nil], \vs).isNil
+	);
+	assert.("~songFilePath honours explicit 'none'",
+		~songFilePath.(IdentityDictionary[\name -> "Test Song 1", \vs -> "none"], \vs).isNil
+	);
+	assert.("~songFilePath honours explicit 'none' for Dica",
+		~songFilePath.(IdentityDictionary[\name -> "Test Song 1", \dica -> "none"], \dica).isNil
+	);
 
 	// ── Test 3: setBpm updates the shared clock ───────────────────────────
 	~setBpm.(140);
@@ -63,7 +79,7 @@ s.waitForBoot({
 	);
 
 	// ── Test 4: btStop does not crash when not playing ────────────────────
-	var threw = false;
+	threw = false;
 	try { ~btStop.(); } { threw = true; };
 	assert.("~btStop safe when nothing is playing", threw.not);
 	assert.("~btPlaying is false after stop", ~btPlaying == false);
@@ -89,7 +105,7 @@ s.waitForBoot({
 	assert.("\\btPrev OSCdef exists", OSCdef(\btPrev).notNil);
 
 	// ── Test 8: Play with a real WAV file (if present) ────────────────────
-	var testVS = projectDir +/+ "media/Test Song 1 (VS).wav";
+	testVS = projectDir +/+ "media/Test Song 1 (VS).wav";
 	if (File.exists(testVS), {
 		"  Found test VS file — testing disk-streaming play...".postln;
 		~btSongIndex = 0;

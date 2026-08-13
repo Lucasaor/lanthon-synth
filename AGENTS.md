@@ -71,7 +71,7 @@ Setlists: [setlists/](setlists/) — JSON files edited via web UI.
 1. **No Sonic Pi.** Use `sclang`/`scsynth` directly.
 2. **Backtracks stream from disk** (`VDiskIn`) — never load full audio files into RAM.
 3. **Every `MIDIdef`/`MIDIFunc` must be filtered by `srcID`** — never assume note/CC numbers are globally unique across devices.
-4. **All timing derives from one shared `TempoClock`** — tempo set from setlist song BPM, never from audio analysis.
+4. **All timing derives from one shared `TempoClock`** — songs carry tuning (standard/drop + key) instead of BPM; clock tempo is set via MIDI tempo knob or tap tempo (default 120), never from audio analysis.
 5. **No controller crash on absence.** Guard all MIDI handlers; log warnings, never throw. Hot-plug re-registers handlers.
 6. **Effects on shared buses, not per-voice** — keep SynthDefs cheap to protect 8-voice headroom.
 7. **Web UI must not hold audio buffers in memory.**

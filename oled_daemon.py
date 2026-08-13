@@ -9,11 +9,11 @@ Display layout (128×64, blue region top row, yellow region bottom rows):
   Line 1 (top, blue):   Setlist name
   Line 2:               Artist name
   Line 3:               Song name
-  Line 4 (bottom):      [PLAYING / STOP]  BPM: xxx
+  Line 4 (bottom):      [PLAYING / STOP]  <tuning>   (e.g. "Drop D")
 
 OSC interface (UDP, default port 9000):
-  /oled/update  <setlistName> <artist> <songName> <state> <bpm>
-    Example: /oled/update "Night 1" "Tool" "Sober" "PLAYING" "120"
+  /oled/update  <setlistName> <artist> <songName> <state> <tuning>
+    Example: /oled/update "Night 1" "Tool" "Sober" "PLAYING" "Drop D"
 
 Requirements (install on Pi):
   pip3 install luma.oled python-osc Pillow
@@ -65,7 +65,7 @@ class DisplayState:
     artist: str = "—"
     song_name: str = "—"
     playback_state: str = "STOP"   # "PLAYING" or "STOP"
-    bpm: str = "—"
+    tuning: str = "—"              # e.g. "Drop D", "Standard E"
     sc_online: bool = False        # True when SC heartbeat is recent
     sc_playing: bool = False       # True when SC reports playback active
     dirty: bool = True             # True = needs re-render
@@ -78,16 +78,16 @@ _last_heartbeat = 0.0
 HEARTBEAT_TIMEOUT = 45.0   # seconds before SC is considered offline
 
 def update_state(setlist_name: str, artist: str, song_name: str,
-                 playback_state: str, bpm: str) -> None:
+                 playback_state: str, tuning: str) -> None:
     global _state
     with _state_lock:
         _state.setlist_name   = setlist_name[:20] or "—"
         _state.artist         = artist[:20] or "—"
         _state.song_name      = song_name[:20] or "—"
         _state.playback_state = playback_state or "STOP"
-        _state.bpm            = str(bpm) or "—"
+        _state.tuning         = str(tuning) or "—"
         _state.dirty = True
-    log.info("State: %s | %s — %s | %s BPM", playback_state, artist, song_name, bpm)
+    log.info("State: %s | %s — %s | Tuning: %s", playback_state, artist, song_name, tuning)
 
 def handle_heartbeat(online: int, playing: int) -> None:
     """Receive periodic heartbeat from SC to confirm it's alive."""
@@ -118,14 +118,14 @@ def start_osc_server() -> None:
     dispatcher = Dispatcher()
 
     def oled_update_handler(address, *args):
-        # Expected: /oled/update setlist artist song state bpm
+        # Expected: /oled/update setlist artist song state tuning
         try:
             setlist = str(args[0]) if len(args) > 0 else "—"
             artist  = str(args[1]) if len(args) > 1 else "—"
             song    = str(args[2]) if len(args) > 2 else "—"
             state   = str(args[3]) if len(args) > 3 else "STOP"
-            bpm     = str(args[4]) if len(args) > 4 else "—"
-            update_state(setlist, artist, song, state, bpm)
+            tuning  = str(args[4]) if len(args) > 4 else "—"
+            update_state(setlist, artist, song, state, tuning)
         except Exception as exc:
             log.warning("Bad OSC message: %s", exc)
 
@@ -182,7 +182,7 @@ def render(device, state: DisplayState) -> None:
       Row 0 (y=0):  Setlist name  (small, top blue region)
       Row 1 (y=14): Artist         (small)
       Row 2 (y=28): Song name      (small, may truncate)
-      Row 3 (y=44): [STATE]  BPM:xxx  (large, bottom yellow region)
+      Row 3 (y=44): [STATE]  <tuning>  (large, bottom yellow region)
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -213,9 +213,13 @@ def render(device, state: DisplayState) -> None:
     draw.text((0, 14), state.artist[:18],        font=font_sm, fill=255)
     # Line 3: song name
     draw.text((0, 28), state.song_name[:18],     font=font_sm, fill=255)
-    # Line 4: state + BPM (larger, in the bottom yellow region)
-    state_str = f"{state.playback_state}  BPM:{state.bpm}"
-    draw.text((0, 44), state_str,                font=font_lg, fill=255)
+    # Line 4: state + tuning (larger, in the bottom yellow region)
+    state_str = f"{state.playback_state}  {state.tuning}"
+    # Auto-shrink if the tuning label would overflow the 128px width
+    font = font_lg
+    if draw.textlength(state_str, font=font_lg) > DISPLAY_W - 4:
+        font = font_sm
+    draw.text((0, 44), state_str, font=font, fill=255)
 
     if device is not None:
         device.display(img)
@@ -251,7 +255,7 @@ def render_loop(device) -> None:
                     artist         = _state.artist,
                     song_name      = _state.song_name,
                     playback_state = _state.playback_state,
-                    bpm            = _state.bpm,
+                    tuning         = _state.tuning,
                     sc_online      = _state.sc_online,
                     sc_playing     = _state.sc_playing,
                 )

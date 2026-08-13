@@ -303,7 +303,7 @@ The 0.96″ I2C display shows backtrack state only. Layout:
 ├──────────────────────────────┤
 │ Tool                         │  Line 2: artist
 │ Sober                        │  Line 3: song name
-│ PLAYING  BPM:120             │  Line 4: state + tempo
+│ PLAYING  Drop D              │  Line 4: state + tuning
 └──────────────────────────────┘  ← yellow region
 ```
 
@@ -317,7 +317,7 @@ URL: `http://lanth0n.local:5000` (or `http://<pi-ip>:5000`)
 |--------------|----------------------------------------------------------------|
 | Dashboard    | Quick play/stop/prev/next, setlist loader, SC health indicator |
 | Files        | Upload VS/click/Dica/sample files (MP3 auto-converted to WAV) |
-| Setlists     | Create, edit, reorder, delete setlists (name/artist/BPM/files)|
+| Setlists     | Create, edit, reorder, delete setlists (name/artist/tuning/files)|
 | MIDI Map     | Assign backtrack control, SMK25 knob MIDI-learn                |
 | Routing      | FOH/IEM channel assignment per track type and loop outputs     |
 | APC Pads     | 8×8 grid view: configure oscillator per pad in row 0          |
@@ -353,7 +353,7 @@ s.avgCPU.postln         // Check audio CPU load
 | SMK25 not responding            | BT disconnect; reconnect or wait for device watcher (5 s)          |
 | Knob has no effect              | Check CC number in web MIDI-learn; default map may differ          |
 | Worlde / SMK25 pad silent       | No buffer loaded; assign a sample in web UI                        |
-| Loop not quantized              | TempoClock BPM must be set before recording; check OLED BPM        |
+| Loop not quantized              | TempoClock BPM must be set before recording; check OLED tuning    |
 | Loop playback out of sync       | Re-record at correct tempo; metronome row shows current position   |
 | Backtrack won't play            | File missing or wrong format; check `media/` directory             |
 | OLED blank                      | Check I2C: `i2cdetect -y 1`; verify `lanthon-oled` service         |
@@ -599,7 +599,7 @@ The 0.96" I2C display shows only backtrack state. Layout:
 ├─────────────────────────────┤
 │ Tool                        │  Artist
 │ Sober                       │  Song name
-│ PLAYING  BPM:120            │  State + tempo
+│ PLAYING  Drop D             │  State + tuning
 └─────────────────────────────┘  ← yellow region (bottom 20 px)
 ```
 

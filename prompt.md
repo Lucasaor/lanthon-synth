@@ -22,7 +22,7 @@ You are implementing **LANTH0N 5YNTH**: a headless, real-time performance instru
 3. **Low, consistent latency is the top priority**, ahead of feature richness. Prefer simple, cheap SynthDefs over elaborate per-voice effects; put heavier effects (reverb, LPF, HPF, etc.) on shared buses, not per-voice, to protect headroom.
 4. **~8 voices of simultaneous polyphony** must be sustainable without xruns.
 5. **Multiple MIDI controllers must coexist without collisions.** Filter every `MIDIdef`/`MIDIFunc` by the sending device's `srcID`. Never assume note/CC numbers are globally unique across devices.
-6. **All synth timing must derive from one shared `TempoClock`.** The tempo is set from the active song's metadata in the setlist — not inferred from audio files.
+6. **All synth timing must derive from one shared `TempoClock`.** Songs no longer carry a BPM — the clock keeps its current tempo (default 120 BPM), changed only via the MIDI tempo knob or tap tempo, never inferred from audio files.
 7. **CPU governor must be set to `performance`** as part of the deployment script, not a manual step.
 8. **No controller should crash the system when offline.** All MIDI handlers must be guarded so the system boots and runs fully if any or all controllers are absent. Hot-plug detection should re-register handlers when a controller reconnects (including Bluetooth reconnect for SMK25). Log a warning, never throw an unhandled exception.
 9. **RAM preservation is mandatory.** The Pi Zero 2W has 512 MB shared with the GPU. All backtrack audio files must be streamed from disk (never fully loaded into RAM). The web configuration interface must run in a low-footprint mode and must not allocate audio buffers or hold large files in memory. Prefer disk-backed streaming for all media.
@@ -40,7 +40,7 @@ You are implementing **LANTH0N 5YNTH**: a headless, real-time performance instru
 ### Backtrack player
 - A separate `sclang` routine (or a lightweight Python process communicating via OSC) handles streaming playback of MP3 files from disk using `DiskIn` / `VDiskIn` UGens (or equivalent disk-streaming approach).
 - **File naming convention** per song: `<song name> (VS).mp3` (main backtrack → FOH), `<song name> (click).mp3` (click → IEM), `<song name> (Dica).mp3` (cue → IEM).
-- **Setlist** is a JSON file listing songs in order, each with: `name`, `artist`, `tempo` (BPM), and optionally file paths. The active setlist is loaded at runtime; the `TempoClock` is updated to the song's BPM when a song is selected.
+- **Setlist** is a JSON file listing songs in order, each with: `name`, `artist`, `tuning` (standard/drop), `key` (C–B), and optionally file paths. The active setlist is loaded at runtime; the song's tuning (e.g. "Drop D") is shown on the OLED.
 - **Output routing** is configurable: VS → FOH bus, click/Dica → IEM bus. Routing table is stored in the config file and editable via the web interface.
 - **Playback MIDI mapping**: play, stop, next song, and previous song are assignable to any note/CC on any controller, configured via the web interface.
 
@@ -145,7 +145,7 @@ Handle Bluetooth reconnect gracefully: on disconnect, log a warning and automati
 A **SvelteKit** web application (SvelteKit is a good fit here: lightweight, SSR-optional, minimal runtime overhead, easy to run as a Node.js service). It must be accessible from the local network and provides:
 
 1. **File upload**: upload VS/click/Dica MP3 files and sample files to the Pi's local storage.
-2. **Setlist manager**: create, edit, reorder, load, and delete setlists. Each song entry has: name, artist, tempo (BPM), and paths to its VS/click/Dica files.
+2. **Setlist manager**: create, edit, reorder, load, and delete setlists. Each song entry has: name, artist, tuning (standard/drop) and key, and paths to its VS/click/Dica files.
 3. **MIDI mapping**: assign any note/CC on any controller to: play, stop, next song, previous song, and other assignable functions. Displays detected controllers, allows learn-mode mapping. Includes a **SMK25 knob assignment** panel where each SMK25 knob CC can be MIDI-learned to any engine parameter (LPF cutoff, HPF cutoff, attack, decay, sustain, release, reverb room size, delay time/frequency, FX mix, tempo, etc.).
 4. **Output routing**: configure which audio channels receive VS, click, Dica, synth, and loop track outputs (FOH vs IEM).
 5. **APC Mini pad configuration**: an 8×8 grid UI. Row 1 allows configuring the oscillator waveform per pad; rows 2–6 show fixed function labels; rows 7–8 show loop track and metronome status (read-only in this view).
@@ -160,12 +160,12 @@ A small Python daemon (driven by `luma.oled`) renders to the 128×64 display ove
 - Line 1: Setlist name
 - Line 2: Artist name
 - Line 3: Song name
-- Line 4: Playback state (STOP / PLAYING / …) + current BPM
+- Line 4: Playback state (STOP / PLAYING / …) + song tuning (e.g. "Drop D", "Standard E")
 
 All backtrack-related state changes must immediately push an OSC update to the OLED daemon. No other system state (synth voices, FX pads) is shown on the OLED — it is exclusively a backtrack monitor.
 
 ### Shared clock
-A single `TempoClock` instance is the authoritative timing source for all synth quantization. Its tempo is updated whenever a new song is selected from the setlist (using the song's configured BPM). The clock is never derived from audio content.
+A single `TempoClock` instance is the authoritative timing source for all synth quantization. Its tempo is set via the MIDI tempo knob or tap tempo (songs no longer carry a BPM). The clock is never derived from audio content.
 
 ---
 
@@ -209,7 +209,7 @@ At this step, handlers only log received messages — no audio or state changes 
 ### Step 3 — I2C OLED display daemon
 Write a Python daemon (`oled_daemon.py`) using `luma.oled` (SSD1306 driver) that:
 - Listens on a UDP OSC port for display-update messages from sclang.
-- Renders the four-line backtrack display (setlist / artist / song / state+BPM) in a clear, readable font.
+- Renders the four-line backtrack display (setlist / artist / song / state+tuning) in a clear, readable font.
 - Handles I2C bus unavailability gracefully (log error and continue — do not crash sclang if the display is disconnected).
 - Runs as its own `systemd` service.
 
@@ -219,12 +219,12 @@ Write a Python daemon (`oled_daemon.py`) using `luma.oled` (SSD1306 driver) that
 
 ### Step 4 — Backtrack engine (disk-streaming, setlist, routing)
 Implement the backtrack player:
-- Loads a setlist JSON file (`setlists/<name>.json`) containing an ordered array of songs, each with `name`, `artist`, `tempo` (BPM), and optionally `vs`, `click`, `dica` file paths.
+- Loads a setlist JSON file (`setlists/<name>.json`) containing an ordered array of songs, each with `name`, `artist`, `tuning` (standard/drop), `key`, and optionally `vs`, `click`, `dica` file paths.
 - Streams VS/click/Dica MP3 files from disk using `VDiskIn` (or `DiskIn` with appropriate buffer sizing). **Never load the full file into RAM.**
 - Routes VS → FOH bus, click/Dica → IEM bus. Routing is read from the config file at startup.
 - Exposes OSC commands: `/backtrack/play`, `/backtrack/stop`, `/backtrack/next`, `/backtrack/prev`, `/backtrack/load <setlist_name>`. These OSC commands are also the targets for MIDI-mapped controls.
-- On song selection, updates the shared `TempoClock` to the song's BPM and sends an OSC update to the OLED daemon.
-- When a file is missing for a song, log a warning and continue — do not crash or halt playback of other channels.
+- On song selection, sends an OSC update to the OLED daemon including the song's tuning label (e.g. "Drop D").
+- When a file is missing for a song, log a warning and continue — do not crash or halt playback of other channels. VS and Dica tracks are **optional** (click-only songs are supported); an explicit `"none"` in the setlist disables a track.
 
 **Verify:** load a test setlist with real MP3 files. Confirm disk-streaming playback with no full-file RAM load (check `s.avgCPU` and system `free` memory). Confirm next/prev navigation, tempo clock update, and OLED update. Test with a missing file — confirm graceful warning.
 
@@ -319,11 +319,11 @@ Re-use the offline-resilient MIDI routing from Step 2 — if the mapped controll
 ---
 
 ### Step 11 — Shared clock + tempo sync
-Confirm the single `TempoClock` is the authoritative source for all synth quantization. Its BPM is set only from the active song's `tempo` field in the setlist — never from audio content analysis.
+Confirm the single `TempoClock` is the authoritative source for all synth quantization. Its BPM is set only via the MIDI tempo knob / tap tempo (songs no longer carry a `tempo` field) — never from audio content analysis.
 
-When a song is selected, update `TempoClock.tempo`, push the update to the OLED daemon, and confirm no drift between synth timing and the new tempo setting over an extended run.
+When a song is selected, push the update to the OLED daemon (with the song's tuning), and confirm no drift between synth timing and the clock over an extended run.
 
-**Verify:** set two songs with different BPMs, switch between them, confirm `TempoClock` updates immediately and the click voice (IEM-only) matches. Confirm click does not bleed to FOH bus. Run for 5+ minutes, confirm no drift.
+**Verify:** set two songs with different tunings, switch between them, confirm the OLED tuning label updates immediately and the click voice (IEM-only) matches. Confirm click does not bleed to FOH bus. Run for 5+ minutes, confirm no drift.
 
 ---
 
@@ -332,7 +332,7 @@ Implement the SvelteKit web app as described in the Architecture section. The ap
 
 Required pages:
 1. **Files** — upload VS/click/Dica MP3 files and sample files. Files are saved to a dedicated directory on the Pi's storage; no file content is kept in process memory after the upload stream completes.
-2. **Setlists** — create, edit, reorder, load, and delete setlists. Each song: name, artist, BPM, file assignments.
+2. **Setlists** — create, edit, reorder, load, and delete setlists. Each song: name, artist, tuning/key, file assignments.
 3. **MIDI Mapping** — learn-mode assignment for play/stop/next/prev and other assignable functions. Includes **SMK25 knob assignment** panel: MIDI-learn each knob CC to any engine parameter (LPF, HPF, attack, decay, sustain, release, reverb room size, delay time/frequency, FX mix, tempo, etc.).
 4. **Output Routing** — channel assignment for VS, click, Dica, synth, and loop track outputs (FOH/IEM/both).
 5. **APC Mini Pads** — 8×8 grid UI; configure oscillator waveform per pad in Row 1; rows 2–6 show fixed function labels; rows 7–8 show loop track and metronome status (read-only).
@@ -373,7 +373,7 @@ Monitor and log: `s.avgCPU`, `s.peakCPU`, JACK xrun count, system RAM (`free -m`
 ## Testing strategy (to minimize physical back-and-forth on the Pi)
 
 - **Develop and validate on a host machine first wherever possible.** SuperCollider SynthDefs, MIDI routing logic, backtrack engine, and OLED OSC protocol are all portable — write and test on a desktop/laptop before deploying to the Pi.
-- **Write automated tests, not just listening checks.** For every step, write sclang test routines (and Python unit tests for the OLED daemon and web backend) that assert on state — e.g., verify an FX pad's state variable after a simulated button press, verify the `TempoClock` BPM after a song selection, verify OSC messages are emitted with correct arguments. Log all test results to a file.
+- **Write automated tests, not just listening checks.** For every step, write sclang test routines (and Python unit tests for the OLED daemon and web backend) that assert on state — e.g., verify an FX pad's state variable after a simulated button press, verify the song's tuning label is emitted on selection, verify OSC messages are emitted with correct arguments. Log all test results to a file.
 - **Simulate MIDI input when hardware is absent.** Use a virtual MIDI port (IAC Driver on macOS, ALSA loopback on Linux). Write a small simulation script that injects note/CC/program-change messages with the correct `srcID`-equivalent, covering normal operation and offline/reconnect scenarios.
 - **Test the offline-resilience requirement at every step from Step 2 onward.** Before marking any step as complete, explicitly test with each controller absent and confirm the system does not crash.
 - **Test disk-streaming under memory pressure.** Before deploying to the Pi, simulate 512 MB RAM by constraining the test process and confirm no file is fully loaded into RAM.

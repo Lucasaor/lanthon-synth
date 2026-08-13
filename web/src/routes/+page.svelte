@@ -7,7 +7,7 @@
   let playing = data.playing ?? false;
   let songName = data.songName ?? '';
   let artist = data.artist ?? '';
-  let bpm = data.bpm ?? 0;
+  let tuning = data.tuning ?? '';
   let busy = false;   // true during OSC request
 
   onMount(() => {
@@ -21,7 +21,7 @@
           playing = s.playing ?? false;
           songName = s.songName ?? '';
           artist = s.artist ?? '';
-          bpm = s.bpm ?? 0;
+          tuning = s.tuning ?? '';
         }
       } catch {}
     }, 3000);
@@ -67,7 +67,7 @@
   <div class="status-banner playing">
     🔊 LIVE — <strong>{songName || 'Playing...'}</strong>
     {#if artist}by {artist}{/if}
-    {#if bpm > 0} @ {bpm} BPM{/if}
+    {#if tuning} — {tuning}{/if}
     — Setlist: {activeSetlist}
   </div>
 {:else}

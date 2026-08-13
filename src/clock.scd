@@ -5,8 +5,10 @@
 //   1. The click/metronome \click Synth (routed to ~iemOutBus, NEVER FOH)
 //   2. Any synth quantization that needs beat alignment
 //
-// Tempo is set from the active song's metadata (tempo field in the setlist JSON).
-// It is NEVER inferred from audio content — the setlist is the authority.
+// Tempo is NOT taken from setlist songs anymore (songs carry tuning/key instead
+// of BPM). The clock keeps its current tempo (default 120 BPM) and is changed
+// only via ~setBpm (MIDI tempo knob) or ~tapTempo.
+// It is NEVER inferred from audio content.
 // The OLED daemon is notified on every tempo change via ~oledUpdate (defined
 // in backtrack.scd — called here if it exists).
 
@@ -88,7 +90,7 @@
 
 // ----- Change tempo while running -----
 // This is the ONLY function that should change ~mainClock.tempo.
-// It is called by backtrack.scd when a new song is selected.
+// It is called by midi_routing.scd (tempo knob) and ~tapTempo.
 ~setBpm = { |newBpm|
 	newBpm = newBpm.clip(20.0, 300.0);
 	if (~mainClock.notNil, {

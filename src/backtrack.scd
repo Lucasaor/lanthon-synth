@@ -15,7 +15,8 @@
 //   {
 //     "name": "Night 1",
 //     "songs": [
-//       { "name": "Song Name", "artist": "Artist", "tempo": 128 },
+//       { "name": "Song Name", "artist": "Artist",
+//         "tuning": "drop", "key": "D" },
 //       ...
 //     ]
 //   }
@@ -30,7 +31,7 @@
 //   /backtrack/next
 //   /backtrack/prev
 //   /backtrack/load  <setlistName>   (string, no ".json" extension)
-//   /backtrack/tempo <bpm>           (float, overrides song tempo)
+//   /backtrack/tempo <bpm>           (float, sets the shared TempoClock)
 //
 // Playback state is broadcast to the OLED daemon via OSC on ~oledOscPort.
 // =============================================================================
@@ -116,7 +117,7 @@
 };
 
 // Minimal JSON parser for setlist files.
-// Returns: (name: String, songs: Array of (name, artist, tempo, vs, click, dica))
+// Returns: (name: String, songs: Array of (name, artist, tuning, key, vs, click, dica))
 // This is intentionally simple. Use JSONlib for production robustness.
 ~parseSetlistJSON = { |jsonString|
 	// Extract top-level "name" field
@@ -130,8 +131,8 @@
 		var entry = m[1];
 		var songName   = ~extractJSON.(entry, "name");
 		var artist     = ~extractJSON.(entry, "artist");
-		var tempoStr   = ~extractJSON.(entry, "tempo");
-		var tempo      = tempoStr !? { tempoStr.asFloat } ? 120.0;
+		var tuning     = ~extractJSON.(entry, "tuning") ? "standard";
+		var keyName    = ~extractJSON.(entry, "key") ? "E";
 		var vsFile     = ~extractJSON.(entry, "vs");
 		var clickFile  = ~extractJSON.(entry, "click");
 		var dicaFile   = ~extractJSON.(entry, "dica");
@@ -139,7 +140,8 @@
 		songs.add(IdentityDictionary[
 			\name   -> songName,
 			\artist -> artist,
-			\tempo  -> tempo,
+			\tuning -> tuning,
+			\key    -> keyName,
 			\vs     -> vsFile,
 			\click  -> clickFile,
 			\dica   -> dicaFile
@@ -169,40 +171,61 @@
 	}, { nil })
 };
 
+// Format a song's tuning for display: "Drop D", "Drop C#", "Standard E", "—".
+~tuningLabel = { |song|
+	var tuning  = song !? { song[\tuning] } ? nil;
+	var keyName = song !? { song[\key] } ? nil;
+	var label = "—";
+	if (tuning.notNil and: { keyName.notNil }, {
+		label = "% %".format(
+			if (tuning.asString.toLower == "drop", { "Drop" }, { "Standard" }),
+			keyName.asString.toUpper
+		);
+	});
+	label
+};
+
 // Build file path for a given track type (\vs, \click, \dica).
 // If the song has an explicit file name (set via web UI), use that directly.
+// An explicit value of "none" disables the track (optional VS / Dica tracks).
 // Otherwise fall back to the naming convention: "<Song Name> (VS).wav" etc.
 // Tries multiple case variants since ffmpeg may preserve original capitalization.
+// Returns nil when no file could be resolved (caller skips the track).
 ~songFilePath = { |song, trackType|
 	var explicit = song[trackType];   // e.g. song[\vs], song[\click], song[\dica]
-	if (explicit.notNil and: { explicit.asString != "" }, {
-		// Explicit file path from web UI — just join with media dir
-		~mediaDir +/+ explicit.asString
+	var result;
+	if (explicit.notNil and: { explicit.asString == "none" }, {
+		// Track explicitly disabled in the web UI
+		result = nil;
 	}, {
-		// Fallback: auto-detect by naming convention
-		// Try multiple case variants for the suffix (ffmpeg may preserve caps)
-		var baseName = song[\name] ? "unknown";
-		var suffixes = switch(trackType,
-			\vs,    ["(VS)", "(vs)"],
-			\click, ["(click)", "(Click)", "(click)"],
-			\dica,  ["(Dica)", "(dica)"],
-			[""]
-		);
-		// Also try .mp3 / .aiff extensions
-		var exts = ["wav", "WAV", "mp3", "aiff", "AIFF"];
-		var result = block { |break|
-			suffixes.do { |sfx|
-				exts.do { |ext|
-					var path = ~mediaDir +/+ "%% %.%".format(baseName, sfx, ext);
-					if (File.exists(path), { break.(path); });
+		if (explicit.notNil and: { explicit.asString != "" }, {
+			// Explicit file path from web UI — just join with media dir
+			result = ~mediaDir +/+ explicit.asString
+		}, {
+			// Fallback: auto-detect by naming convention
+			// Try multiple case variants for the suffix (ffmpeg may preserve caps)
+			var baseName = song[\name] ? "unknown";
+			var suffixes = switch(trackType,
+				\vs,    ["(VS)", "(vs)"],
+				\click, ["(click)", "(Click)", "(click)"],
+				\dica,  ["(Dica)", "(dica)"],
+				[""]
+			);
+			// Also try .mp3 / .aiff extensions
+			var exts = ["wav", "WAV", "mp3", "aiff", "AIFF"];
+			result = block { |break|
+				suffixes.do { |sfx|
+					exts.do { |ext|
+						var path = ~mediaDir +/+ "%% %.%".format(baseName, sfx, ext);
+						if (File.exists(path), { break.(path); });
+					};
 				};
+				// No convention match — track is optional / missing
+				nil
 			};
-			// Return the first (default) path even if it doesn't exist
-			// — ~btPlay will log a warning if missing
-			~mediaDir +/+ "% %.wav".format(baseName, suffixes[0])
-		};
-		result
+		});
 	});
+	result
 };
 
 // =============================================================================
@@ -221,7 +244,7 @@
 			var vsPath    = ~songFilePath.(song, \vs);
 			var clickPath = ~songFilePath.(song, \click);
 			var cuePath   = ~songFilePath.(song, \dica);
-			var hasClick  = File.exists(clickPath);
+			var hasClick  = clickPath.notNil and: { File.exists(clickPath) };
 			// Rate correction: file may differ from server (48kHz); SoundFile reads metadata only.
 			var vsRate    = 1.0;
 			var clickRate = 1.0;
@@ -230,7 +253,8 @@
 
 			// Read WAV header rate: bytes 24-27 little-endian uint32.
 			// Var must be at top of block (SC executeFile rule #2).
-			if (File.exists(vsPath), {
+			// VS and Dica are optional — skip silently when not configured.
+			if (vsPath.notNil and: { File.exists(vsPath) }, {
 				var f; var b0; var b1; var b2; var b3; var sr;
 				f = File.open(vsPath, "r");
 				if (f.notNil, {
@@ -242,7 +266,11 @@
 				});
 				~btVSBuf = Buffer.cueSoundFile(s, vsPath, 0, 2, bufferSize: 32768);
 			}, {
-				"[BT] WARNING: file not found — %".format(vsPath).postln;
+				if (vsPath.isNil, {
+					"[BT] No VS track (optional) — skipping".postln;
+				}, {
+					"[BT] WARNING: file not found — %".format(vsPath).postln;
+				});
 			});
 			if (hasClick, {
 				var f; var b0; var b1; var b2; var b3; var sr;
@@ -256,9 +284,10 @@
 				});
 				~btClickBuf = Buffer.cueSoundFile(s, clickPath, 0, 2, bufferSize: 32768);
 			}, {
-				"[BT] WARNING: file not found — %".format(clickPath).postln;
+				"[BT] WARNING: click file not found — %".format(clickPath ? "(none)").postln;
 			});
-			if (File.exists(cuePath), {
+			// Dica (cue) is optional — skip silently when not configured.
+			if (cuePath.notNil and: { File.exists(cuePath) }, {
 				var f; var b0; var b1; var b2; var b3; var sr;
 				f = File.open(cuePath, "r");
 				if (f.notNil, {
@@ -270,7 +299,11 @@
 				});
 				~btCueBuf = Buffer.cueSoundFile(s, cuePath, 0, 2, bufferSize: 32768);
 			}, {
-				"[BT] WARNING: file not found — %".format(cuePath).postln;
+				if (cuePath.isNil, {
+					"[BT] No Dica track (optional) — skipping".postln;
+				}, {
+					"[BT] WARNING: file not found — %".format(cuePath).postln;
+				});
 			});
 
 			s.sync;
@@ -315,16 +348,14 @@
 				]);
 			});
 
-			// Update shared clock to song's tempo
-			if (song[\tempo].notNil, {
-				~setBpm.(song[\tempo].asFloat);
-			});
+			// NOTE: songs no longer carry a BPM — the shared TempoClock keeps
+			// its current tempo (default 120, changed via MIDI knob / tap tempo).
 
 			~btPlaying = true;
 			~writeState.();
 			~oledUpdate.();
-			"[BT] PLAYING: % — % @ % BPM".format(
-				song[\name], song[\artist], song[\tempo]).postln;
+			"[BT] PLAYING: % — % [%]".format(
+				song[\name], song[\artist], ~tuningLabel.(song)).postln;
 		}.play(AppClock);
 	}, {
 		"[BT] No song selected (load a setlist first)".postln;
@@ -413,17 +444,17 @@
 	var setName = ~btSetlist !? { ~btSetlist[\name] } ? "";
 	var name   = song !? { song[\name] } ? "";
 	var artist = song !? { song[\artist] } ? "";
-	var bpm    = song !? { song[\tempo].asInteger } ? 0;
+	var tuning = song !? { ~tuningLabel.(song) } ? "";
 	var playing = if (~btPlaying, "true", "false");
 	var json;
 	var f;
 
-	json = "{\"activeSetlist\":\"%\",\"songName\":\"%\",\"artist\":\"%\",\"playing\":%, \"bpm\":%}".format(
+	json = "{\"activeSetlist\":\"%\",\"songName\":\"%\",\"artist\":\"%\",\"playing\":%, \"tuning\":\"%\"}".format(
 		~jsonEscape.(setName),
 		~jsonEscape.(name),
 		~jsonEscape.(artist),
 		playing,
-		bpm
+		~jsonEscape.(tuning)
 	);
 
 	// Write to config/state.json in the project root
@@ -438,7 +469,7 @@
 // OLED UPDATE
 // =============================================================================
 // Sends an OSC message to the OLED daemon with the current playback state.
-// Message format: /oled/update <setlistName> <artist> <songName> <state> <bpm>
+// Message format: /oled/update <setlistName> <artist> <songName> <state> <tuning>
 
 ~oledUpdate = {
 	var song = ~currentSong.();
@@ -446,10 +477,10 @@
 	var artist  = song !? { song[\artist] } ? "—";
 	var name    = song !? { song[\name]   } ? "—";
 	var state   = if (~btPlaying, "PLAYING", "STOP");
-	var bpm     = song !? { song[\tempo].asInteger.asString } ? "—";
+	var tuning  = song !? { ~tuningLabel.(song) } ? "—";
 
 	if (~oledSender.notNil, {
-		~oledSender.sendMsg("/oled/update", setlistName, artist, name, state, bpm);
+		~oledSender.sendMsg("/oled/update", setlistName, artist, name, state, tuning);
 	});
 };
 

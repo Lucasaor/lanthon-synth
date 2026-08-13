@@ -9,6 +9,6 @@ export async function load() {
     songName:      state.songName ?? null,
     artist:        state.artist ?? null,
     playing:       state.playing === true || state.playing === 'true',
-    bpm:           state.bpm ?? 0,
+    tuning:        state.tuning ?? null,
   };
 }

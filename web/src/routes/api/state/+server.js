@@ -1,5 +1,5 @@
 /**
- * GET  /api/state → { activeSetlist, songName, artist, playing, bpm }
+ * GET  /api/state → { activeSetlist, songName, artist, playing, tuning }
  *
  * Reads state.json written by the SuperCollider backtrack engine.
  * SC writes this file on every playback state change (play/stop/next/prev/load).
@@ -19,6 +19,6 @@ export async function GET() {
     songName:      state.songName ?? null,
     artist:        state.artist ?? null,
     playing:       state.playing === true || state.playing === 'true',
-    bpm:           state.bpm ?? 0,
+    tuning:        state.tuning ?? null,
   });
 }

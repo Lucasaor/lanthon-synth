@@ -186,10 +186,10 @@ pkill jackd 2>/dev/null || true
 sleep 1
 jackd -R -d alsa \
   -d hw:${USB_CARD} \
-  -r 44100 \
+  -r 48000 \
   -p 256 \
   -n 2 \
-  -o 4 \
+  -o 2 \
   -i 2 \
   &>/var/log/lanth0n/jack.log &
 sleep 2

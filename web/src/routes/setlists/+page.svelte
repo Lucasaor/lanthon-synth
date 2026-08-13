@@ -5,13 +5,17 @@
   let editing = null;   // currently edited setlist object
   let newName = '';
 
+  const TUNINGS = ['standard', 'drop'];
+  const KEYS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
   async function load(name) {
     const r = await fetch(`/api/setlists/${name}`);
     editing = await r.json();
     editing._name = name;
-    // Ensure songs have file fields
+    // Ensure songs have file fields and tuning defaults
     editing.songs = (editing.songs ?? []).map(s => {
-      const song = { vs: '', click: '', dica: '', ...s };
+      const song = { vs: '', click: '', dica: '', tuning: 'standard', key: 'E', ...s };
+      delete song.tempo;   // legacy BPM field no longer used
       return song;
     });
     // Auto-fill files for each song
@@ -21,6 +25,8 @@
   }
 
   async function save() {
+    // Strip legacy tempo fields before persisting
+    editing.songs = (editing.songs ?? []).map(({ tempo, ...song }) => song);
     await fetch(`/api/setlists/${editing._name}`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
@@ -48,7 +54,7 @@
 
   function addSong() {
     editing.songs = [...(editing.songs ?? []),
-      { name: 'New Song', artist: '', tempo: 120, vs: '', click: '', dica: '' }];
+      { name: 'New Song', artist: '', tuning: 'standard', key: 'E', vs: '', click: '', dica: '' }];
   }
 
   async function activateSetlist(name) {
@@ -69,29 +75,21 @@
   }
 
   /**
-   * Auto-fill VS/Click/Dica dropdowns based on the song name.
+   * Auto-fill the Click dropdown based on the song name.
    * Searches media files for matches like:
-   *   "Song Name (VS).wav"  → VS
    *   "Song Name (click).wav"  → click
-   *   "Song Name (Dica).wav"  → Dica
    * Only fills empty fields (doesn't overwrite manual selections).
+   * VS and Dica are optional and are never auto-filled.
    */
   function autoFillFiles(song) {
     if (!song?.name) return;
     const lower = song.name.toLowerCase();
-    const suffixes = ['vs', 'click', 'dica'];
-    const labels  = ['(VS)', '(Click)', '(Dica)', '(click)', '(dica)'];
 
     for (const f of mediaFiles) {
       const fLower = f.toLowerCase();
       if (!fLower.includes(lower)) continue;
-      // Check if this file matches any of our label patterns
-      for (let i = 0; i < labels.length; i++) {
-        const label = labels[i].toLowerCase();
-        if (fLower.includes(label)) {
-          const key = i < 3 ? suffixes[i] : suffixes[i % 3];
-          if (!song[key]) { song[key] = f; }   // only auto-fill empty
-        }
+      if (fLower.includes('(click)')) {
+        if (!song.click) { song.click = f; }   // only auto-fill empty
       }
     }
   }
@@ -131,13 +129,23 @@
         <input bind:value={song.name} placeholder="Song name" style="flex:2"
           on:input={() => autoFillFiles(song)} />
         <input bind:value={song.artist} placeholder="Artist" style="flex:2" />
-        <input type="number" bind:value={song.tempo} placeholder="BPM" style="width:70px; flex:none" />
+        <select bind:value={song.tuning} style="width:96px; flex:none" title="Tuning">
+          {#each TUNINGS as t}
+            <option value={t}>{t === 'drop' ? 'Drop' : 'Standard'}</option>
+          {/each}
+        </select>
+        <select bind:value={song.key} style="width:64px; flex:none" title="Key">
+          {#each KEYS as k}
+            <option value={k}>{k}</option>
+          {/each}
+        </select>
         <button class="danger" on:click={() => editing.songs.splice(i, 1) && (editing.songs = editing.songs)}>✕</button>
       </div>
       <div class="row" style="margin-top:6px; gap:4px; flex-wrap:wrap">
         <label style="font-size:0.8rem; flex:none; width:36px">VS:</label>
         <select bind:value={song.vs} style="flex:1; min-width:140px; font-size:0.8rem">
           <option value="">(auto-detect)</option>
+          <option value="none">(none — optional)</option>
           {#each matchingFiles(song.name, 'VS') as f}
             <option value={f}>{f}</option>
           {/each}
@@ -152,6 +160,7 @@
         <label style="font-size:0.8rem; flex:none; width:36px">Dica:</label>
         <select bind:value={song.dica} style="flex:1; min-width:140px; font-size:0.8rem">
           <option value="">(auto-detect)</option>
+          <option value="none">(none — optional)</option>
           {#each matchingFiles(song.name, 'Dica') as f}
             <option value={f}>{f}</option>
           {/each}
