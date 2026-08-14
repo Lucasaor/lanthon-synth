@@ -45,6 +45,7 @@ run_py_test() {
 echo "Python tests:"
 if "$PY" -c "import pythonosc, soundfile, numpy" 2>/dev/null; then
   run_py_test "$SCRIPT_DIR/test_smf.py"
+  run_py_test "$SCRIPT_DIR/test_devices.py"
   run_py_test "$SCRIPT_DIR/test_engine.py"
   run_py_test "$SCRIPT_DIR/test_oled.py"
 else

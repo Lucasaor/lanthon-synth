@@ -95,13 +95,11 @@ class PortAudioBackend(AudioBackend):
         import sounddevice as sd
 
         for plan in plans:
-            plan.device = default_output_device()
+            if plan.device is None:
+                plan.device = default_output_device()
             plan.n_out = max(device_output_channels(plan.device), 2)
             channels = max(1, max((r.out_ch + 1 for r in plan.routes), default=2))
             channels = min(channels, plan.n_out)
-            if channels > plan.n_out:
-                log.warning("%s: plan needs %d channels but device has %d",
-                            plan.key, channels, plan.n_out)
 
             self._buffers[plan.key] = None
 

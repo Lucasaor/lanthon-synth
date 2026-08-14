@@ -17,7 +17,7 @@ from typing import List, Optional
 
 import numpy as np
 
-from . import paths
+from . import devices, paths
 from .audio import ChannelRoute, DevicePlan, make_backend
 from .midi_io import (
     LearnCapture,
@@ -57,7 +57,16 @@ class Engine:
         self.transport = Transport(sample_rate)
         self.transport.add_listener(self._on_transport_change)
 
-        self.midi_out = NullMidiOut() if offline else self._make_midi_out(midi_out_port)
+        # routing (config/audio_routing.json + live device snapshot)
+        self._routing_cfg = devices.load_routing()
+        self._dev_snapshot = devices.snapshot()
+        midi_out_name = midi_out_port or devices._resolve_midi_out(
+            (self._routing_cfg.get("tracks") or {}).get("midi_automation") or {},
+            self._dev_snapshot,
+        )
+        self._midi_out_name = midi_out_name
+
+        self.midi_out = NullMidiOut() if offline else self._make_midi_out(midi_out_name)
         self.dispatcher = MidiDispatcher(self.midi_out, sample_rate, offline)
         self.mapper = TransportMapper({
             "btPlay": self.play,
@@ -106,16 +115,37 @@ class Engine:
     # ------------------------------------------------------------------
 
     def build_plans(self, song: Song) -> List[DevicePlan]:
-        """Map WAV channels to output channels on the default device."""
-        n = song.nchannels
-        plan = DevicePlan(
-            key="default",
-            name="default output",
-            n_out=max(8, n),
-            routes=[ChannelRoute(wav_ch=i, out_ch=i) for i in range(n)],
-            is_master=True,
+        """Map WAV channels to device channels per config/audio_routing.json."""
+        plans, _midi_name = devices.resolve_routing(
+            self._routing_cfg, song, self._dev_snapshot)
+        return plans
+
+    def apply_routing(self) -> None:
+        """Reload routing config + device snapshot; swap MIDI output and
+        restart audio streams with the new channel mapping."""
+        self._routing_cfg = devices.load_routing()
+        self._dev_snapshot = devices.snapshot()
+        midi_name = devices._resolve_midi_out(
+            (self._routing_cfg.get("tracks") or {}).get("midi_automation") or {},
+            self._dev_snapshot,
         )
-        return [plan]
+        if not self.offline and midi_name != self._midi_out_name:
+            self._midi_out_name = midi_name
+            self.midi_out.close()
+            self.midi_out = self._make_midi_out(midi_name)
+            self.dispatcher.out = self.midi_out
+        song = self.transport.song
+        if song is not None and song.open:
+            self._plans = self.build_plans(song)
+        else:
+            self._plans = [
+                DevicePlan(key="default", name="default output",
+                           device=None, n_out=8, routes=[], is_master=True)
+            ]
+        self.backend.stop()
+        self.backend.start(self._plans, self.sr, self.block_size)
+        log.info("routing applied: %d plan(s), MIDI out '%s'",
+                 len(self._plans), self._midi_out_name or "(none)")
 
     # ------------------------------------------------------------------
     # Setlist / song management
@@ -350,6 +380,11 @@ class Engine:
         while not self._heartbeat_stop.wait(5.0):
             write_state(self._snapshot())
             self.osc.oled_heartbeat(True, self.transport.playing)
+            # keep the device snapshot fresh for the routing UI
+            try:
+                devices.write_devices_snapshot()
+            except Exception:
+                log.exception("device snapshot refresh failed")
 
     # ------------------------------------------------------------------
     # OSC control interface
@@ -366,6 +401,9 @@ class Engine:
         self.osc.on("/midi/learn/start", lambda *a: self.learn.start())
         self.osc.on("/midi/learn/stop", lambda *a: self.learn.stop(cancel=False))
         self.osc.on("/midi/learn/cancel", lambda *a: self.learn.stop(cancel=True))
+        self.osc.on("/config/routing_reload", lambda *a: self.apply_routing())
+        self.osc.on("/devices/refresh",
+                    lambda *a: devices.write_devices_snapshot())
         # compat: /ping (legacy web health probe) — kept for debugging tools
         self.osc.on("/ping", lambda addr, *a: log.debug("OSC /ping from %s", addr))
 

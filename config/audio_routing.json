@@ -1,6 +1,11 @@
 {
-  "vs": "foh",
-  "click": "iem",
-  "dica": "iem",
-  "synth": "foh"
+  "clock_device": "auto",
+  "tracks": {
+    "playback_l": {"device": "auto", "channel": 1},
+    "playback_r": {"device": "auto", "channel": 2},
+    "click": {"device": "auto", "channel": 3},
+    "cue": {"device": "auto", "channel": 4},
+    "timecode": {"device": "auto", "channel": 5, "enabled": false},
+    "midi_automation": {"device": "auto"}
+  }
 }
