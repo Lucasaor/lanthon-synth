@@ -72,4 +72,8 @@ class OscControl:
 
     def stop(self) -> None:
         if self._server is not None:
-            self._server.shutdown()
+            try:
+                self._server.shutdown()
+            except Exception:
+                pass
+            self._server = None
