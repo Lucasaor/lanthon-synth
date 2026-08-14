@@ -2,7 +2,7 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
 
-  let scOnline = false;
+  let engineOnline = false;
   let healthChecked = false;
 
   onMount(() => {
@@ -10,12 +10,12 @@
       try {
         const r = await fetch('/api/health');
         if (r.ok && (await r.json()).ok) {
-          scOnline = true;
+          engineOnline = true;
         } else {
-          scOnline = false;
+          engineOnline = false;
         }
       } catch {
-        scOnline = false;
+        engineOnline = false;
       }
       healthChecked = true;
     };
@@ -30,9 +30,6 @@
     { href: '/setlists',  label: 'Setlists' },
     { href: '/midi',      label: 'MIDI Map' },
     { href: '/routing',   label: 'Routing' },
-    { href: '/pads',      label: 'APC Pads' },
-    { href: '/worlde',    label: 'Worlde Pads' },
-    { href: '/programs',  label: 'Programs' },
   ];
 </script>
 
@@ -42,8 +39,8 @@
     <a href={item.href} class:active={$page.url.pathname === item.href}>{item.label}</a>
   {/each}
   {#if healthChecked}
-    <span class="health" class:green={scOnline} class:red={!scOnline}>
-      {scOnline ? '🔊 SC ONLINE' : '🔇 SC OFFLINE'}
+    <span class="health" class:green={engineOnline} class:red={!engineOnline}>
+      {engineOnline ? '🔊 ENGINE ONLINE' : '🔇 ENGINE OFFLINE'}
     </span>
   {:else}
     <span class="health" style="color:#666">⟳ checking...</span>

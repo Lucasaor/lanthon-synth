@@ -424,11 +424,46 @@ class Engine:
         log.info("Engine started (offline=%s, sr=%d, block=%d)",
                  self.offline, self.sr, self.block_size)
 
-    def run_offline_until_stop(self) -> None:
-        """Offline: render blocks until the transport stops (song end)."""
+    def start_offline_pump(self, rate: float = 1.0) -> None:
+        """Offline: render blocks in a background thread whenever the
+        transport is playing, throttled to realtime speed. Lets the OSC
+        control interface run alongside (hardware-free integration rig)."""
+        period = (self.block_size / self.sr) / rate if rate > 0 else 0.0
+        stop = threading.Event()
+        self._offline_pump_stop = stop
+
+        def pump():
+            block = 0
+            while not stop.is_set():
+                t0 = time.monotonic()
+                if self.transport.playing:
+                    class _Ti:
+                        def __init__(self, dac):
+                            self.outputBufferDacTime = dac
+                    self.tick(self.block_size,
+                              _Ti(block * self.block_size / self.sr), None)
+                    block += 1
+                if period:
+                    elapsed = time.monotonic() - t0
+                    if elapsed < period:
+                        time.sleep(period - elapsed)
+                else:
+                    time.sleep(0.002)
+
+        threading.Thread(target=pump, daemon=True, name="offline-pump").start()
+
+    def run_offline_until_stop(self, rate: float = 0.0) -> None:
+        """Offline: render blocks until the transport stops (song end).
+
+        rate > 0 throttles rendering to realtime speed (LANTH0N_OFFLINE_RATE),
+        which makes the offline driver useful as a hardware-free demo /
+        integration-test rig.
+        """
         self._stop_offline = False
         block = 0
+        period = (self.block_size / self.sr) / rate if rate > 0 else 0.0
         while True:
+            t0 = time.monotonic()
             class _Ti:  # minimal stand-in for PortAudio's time_info
                 def __init__(self, dac):
                     self.outputBufferDacTime = dac
@@ -438,6 +473,10 @@ class Engine:
                 break
             if self.transport.song is None and not self.transport.pending_play:
                 break
+            if period:
+                elapsed = time.monotonic() - t0
+                if elapsed < period:
+                    time.sleep(period - elapsed)
 
     def wait_cued(self, timeout: float = 10.0) -> bool:
         """Block until the current song has finished cueing."""
@@ -464,4 +503,8 @@ class Engine:
         self.midi_in.stop()
         self.backend.stop()
         self.midi_out.close()
+        try:
+            self._offline_pump_stop.set()
+        except AttributeError:
+            pass
         self.osc.stop()

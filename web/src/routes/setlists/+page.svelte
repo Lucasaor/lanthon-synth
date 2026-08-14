@@ -12,11 +12,11 @@
     const r = await fetch(`/api/setlists/${name}`);
     editing = await r.json();
     editing._name = name;
-    // Ensure songs have file fields and tuning defaults.
-    // VS and Dica are optional and default to "none" until auto-detect resolves them.
+    // Each song = one multichannel WAV + one companion MIDI file.
     editing.songs = (editing.songs ?? []).map(s => {
-      const song = { vs: 'none', click: '', dica: 'none', tuning: 'standard', key: 'E', ...s };
-      delete song.tempo;   // legacy BPM field no longer used
+      const song = { wav: '', mid: '', tuning: 'standard', key: 'E', ...s };
+      delete song.tempo;       // legacy BPM field no longer used
+      delete song.vs; delete song.click; delete song.dica;  // legacy split tracks
       return song;
     });
     // Auto-fill files for each song
@@ -26,8 +26,9 @@
   }
 
   async function save() {
-    // Strip legacy tempo fields before persisting
-    editing.songs = (editing.songs ?? []).map(({ tempo, ...song }) => song);
+    // Strip legacy fields before persisting
+    editing.songs = (editing.songs ?? []).map(
+      ({ tempo, vs, click, dica, ...song }) => song);
     await fetch(`/api/setlists/${editing._name}`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
@@ -55,7 +56,7 @@
 
   function addSong() {
     editing.songs = [...(editing.songs ?? []),
-      { name: 'New Song', artist: '', tuning: 'standard', key: 'E', vs: 'none', click: '', dica: 'none' }];
+      { name: 'New Song', artist: '', tuning: 'standard', key: 'E', wav: '', mid: '' }];
   }
 
   /** Move a song up (-1) or down (+1) in the setlist. */
@@ -86,32 +87,27 @@
   }
 
   /**
-   * Auto-detect VS/Click/Dica files based on the song name.
-   * Searches media files for matches like:
-   *   "Song Name (VS).wav"    → VS
-   *   "Song Name (click).wav" → click
-   *   "Song Name (Dica).wav"  → Dica
-   * Only fills fields that have no explicit selection yet ("", "none").
-   * If no VS or Dica file is found, the field is left as "none" (optional tracks).
+   * Auto-detect the song's WAV and MID files based on the song name.
+   * Searches media files for the song name and the right extension:
+   *   "<Song Name>.wav" / "<Song Name> (...).wav"  → WAV
+   *   "<Song Name>.mid" / "<Song Name> (...).mid"  → MID
+   * Only fills fields that have no explicit selection yet.
    */
   function autoFillFiles(song) {
     if (!song?.name) return;
     const lower = song.name.toLowerCase();
-    const found = { vs: null, click: null, dica: null };
+    const found = { wav: null, mid: null };
 
     for (const f of mediaFiles) {
       const fLower = f.toLowerCase();
       if (!fLower.includes(lower)) continue;
-      if (!found.vs    && fLower.includes('(vs)'))    { found.vs    = f; }
-      if (!found.click && fLower.includes('(click)')) { found.click = f; }
-      if (!found.dica  && fLower.includes('(dica)'))  { found.dica  = f; }
+      if (!found.wav && /\.(wav|flac|aiff?)$/.test(fLower)) found.wav = f;
+      if (!found.mid && /\.(midi?)$/.test(fLower)) found.mid = f;
     }
 
-    for (const key of ['vs', 'click', 'dica']) {
-      const current = song[key];
-      if (current === undefined || current === '' || current === 'none') {
-        // VS/Dica fall back to "none"; click falls back to auto-detect ("")
-        song[key] = found[key] ?? (key === 'click' ? '' : 'none');
+    for (const key of ['wav', 'mid']) {
+      if (song[key] === undefined || song[key] === '') {
+        song[key] = found[key] ?? '';
       }
     }
   }
@@ -166,26 +162,19 @@
         <button class="danger" on:click={() => editing.songs.splice(i, 1) && (editing.songs = editing.songs)}>✕</button>
       </div>
       <div class="row" style="margin-top:6px; gap:4px; flex-wrap:wrap">
-        <label style="font-size:0.8rem; flex:none; width:36px">VS:</label>
-        <select bind:value={song.vs} style="flex:1; min-width:140px; font-size:0.8rem">
-          <option value="">(auto-detect)</option>
-          <option value="none">(none — optional)</option>
-          {#each matchingFiles(song.name, 'VS') as f}
+        <label style="font-size:0.8rem; flex:none; width:40px">WAV:</label>
+        <select bind:value={song.wav} style="flex:1; min-width:180px; font-size:0.8rem"
+          title="Multichannel backing track (L, R, Click, Cue + optional Timecode)">
+          <option value="">(none)</option>
+          {#each matchingFiles(song.name, 'wav') as f}
             <option value={f}>{f}</option>
           {/each}
         </select>
-        <label style="font-size:0.8rem; flex:none; width:36px">Click:</label>
-        <select bind:value={song.click} style="flex:1; min-width:140px; font-size:0.8rem">
-          <option value="">(auto-detect)</option>
-          {#each matchingFiles(song.name, 'click') as f}
-            <option value={f}>{f}</option>
-          {/each}
-        </select>
-        <label style="font-size:0.8rem; flex:none; width:36px">Dica:</label>
-        <select bind:value={song.dica} style="flex:1; min-width:140px; font-size:0.8rem">
-          <option value="">(auto-detect)</option>
-          <option value="none">(none — optional)</option>
-          {#each matchingFiles(song.name, 'Dica') as f}
+        <label style="font-size:0.8rem; flex:none; width:36px">MID:</label>
+        <select bind:value={song.mid} style="flex:1; min-width:140px; font-size:0.8rem"
+          title="MIDI automation file (PC/CC to the pedalboard, synced to the audio)">
+          <option value="">(none)</option>
+          {#each matchingFiles(song.name, 'mid') as f}
             <option value={f}>{f}</option>
           {/each}
         </select>

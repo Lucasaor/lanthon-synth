@@ -5,8 +5,7 @@
 import { json } from '@sveltejs/kit';
 import { readConfig, writeConfig } from '$lib/config.js';
 
-const ALLOWED = ['midi_map.json', 'pads_worlde.json', 'audio_routing.json',
-                 'apc_config.json', 'pc_snapshots.json'];
+const ALLOWED = ['midi_map.json', 'audio_routing.json'];
 
 export async function GET({ params }) {
   if (!ALLOWED.includes(params.name)) return json({ error: 'forbidden' }, { status: 403 });

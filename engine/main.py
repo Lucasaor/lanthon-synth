@@ -81,12 +81,17 @@ def main() -> int:
         engine.auto_load_last_setlist()
 
     if offline:
-        if not engine.wait_cued(10.0):
-            print("ERROR: no song cued (check media paths)", file=sys.stderr)
-            return 1
-        engine.play()
-        engine.run_offline_until_stop()
-        print("OFFLINE RENDER COMPLETE")
+        # pump renders while OSC control stays available — good for
+        # hardware-free integration tests and headless demo runs
+        rate = float(os.environ.get("LANTH0N_OFFLINE_RATE", "1.0") or 1.0)
+        engine.start_offline_pump(rate)
+        print("OFFLINE ENGINE RUNNING (Ctrl+C to stop)")
+        try:
+            engine.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down.")
+        finally:
+            engine.shutdown()
         return 0
 
     print("============================================")

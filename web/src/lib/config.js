@@ -13,7 +13,6 @@ const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 export const CONFIG_DIR   = path.join(PROJECT_ROOT, 'config');
 export const SETLISTS_DIR = path.join(PROJECT_ROOT, 'setlists');
 export const MEDIA_DIR    = path.join(PROJECT_ROOT, 'media');
-export const SAMPLES_DIR  = path.join(PROJECT_ROOT, 'samples');
 
 /** Read and parse a JSON config file. Returns null if file doesn't exist. */
 export async function readConfig(filename) {
@@ -76,16 +75,6 @@ export async function listMedia() {
   try {
     await fs.mkdir(MEDIA_DIR, { recursive: true });
     return await fs.readdir(MEDIA_DIR);
-  } catch {
-    return [];
-  }
-}
-
-/** List uploaded sample files. */
-export async function listSamples() {
-  try {
-    await fs.mkdir(SAMPLES_DIR, { recursive: true });
-    return await fs.readdir(SAMPLES_DIR);
   } catch {
     return [];
   }

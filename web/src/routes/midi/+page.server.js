@@ -5,7 +5,6 @@ const ACTIONS = [
   { value: 'btStop',  label: '■ Stop' },
   { value: 'btNext',  label: '⏭ Next Song' },
   { value: 'btPrev',  label: '⏮ Previous Song' },
-  { value: 'btPanic', label: '🛑 Panic (All Notes Off)' },
 ];
 
 export async function load() {

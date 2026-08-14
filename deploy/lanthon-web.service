@@ -16,8 +16,8 @@ WorkingDirectory=%PROJECT_DIR%/web
 ExecStart=/usr/bin/node build/index.js
 Environment=PORT=5000
 Environment=HOST=0.0.0.0
-Environment=SC_HOST=127.0.0.1
-Environment=SC_PORT=57120
+Environment=ENGINE_HOST=127.0.0.1
+Environment=ENGINE_PORT=57120
 Environment=BODY_SIZE_LIMIT=104857600
 
 Restart=on-failure

@@ -1,7 +1,7 @@
 /**
  * POST /api/osc
  * Body: { address: string, args?: any[] }
- * Forwards an OSC message to SuperCollider.
+ * Forwards an OSC command to the playback engine (Python process).
  */
 import { json } from '@sveltejs/kit';
 import { sendOSC } from '$lib/osc.js';

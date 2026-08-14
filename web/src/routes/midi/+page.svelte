@@ -40,7 +40,7 @@
             else if (t === 'sysex') detail = ' (' + d.event.sysexData + ')';
             status = 'Captured: ' + t.toUpperCase() + ' ' + d.event.value + detail +
               '  ch:' + d.event.chan;
-            // Single-shot: SC already deactivated; confirm and stop polling
+            // Single-shot: engine already deactivated; confirm and stop polling
             if (learnPoll) { clearInterval(learnPoll); learnPoll = null; }
             learnActive = false;
             fetch('/api/midi/learn', {

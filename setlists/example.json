@@ -6,13 +6,17 @@
       "artist": "Test Artist",
       "tuning": "drop",
       "key": "D",
-      "notes": "Place 'Test Song 1 (VS).wav', 'Test Song 1 (click).wav', 'Test Song 1 (Dica).wav' in the media/ directory"
+      "wav": "Test Song 1.wav",
+      "mid": "Test Song 1.mid",
+      "notes": "Place 'Test Song 1.wav' (multichannel: L, R, Click, Cue) and 'Test Song 1.mid' (MIDI automation) in the media/ directory"
     },
     {
       "name": "Test Song 2",
       "artist": "Another Artist",
       "tuning": "standard",
-      "key": "E"
+      "key": "E",
+      "wav": "",
+      "mid": ""
     }
   ]
 }

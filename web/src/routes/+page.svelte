@@ -5,13 +5,14 @@
 
   let activeSetlist = data.activeSetlist ?? '(none)';
   let playing = data.playing ?? false;
+  let engineState = data.state ?? 'stopped';
   let songName = data.songName ?? '';
   let artist = data.artist ?? '';
   let tuning = data.tuning ?? '';
   let busy = false;   // true during OSC request
 
   onMount(() => {
-    // Poll state every 3 seconds to stay in sync with SC
+    // Poll state every 2 seconds to stay in sync with the engine
     const poll = setInterval(async () => {
       try {
         const r = await fetch('/api/state');
@@ -19,12 +20,13 @@
           const s = await r.json();
           activeSetlist = s.activeSetlist ?? '(none)';
           playing = s.playing ?? false;
+          engineState = s.state ?? 'stopped';
           songName = s.songName ?? '';
           artist = s.artist ?? '';
           tuning = s.tuning ?? '';
         }
       } catch {}
-    }, 3000);
+    }, 2000);
     return () => clearInterval(poll);
   });
 
@@ -97,8 +99,10 @@
     </button>
   </div>
   <p style="color:#888; margin-top:8px; font-size:0.85rem">
-    Play/Stop/Prev/Next buttons send OSC commands to the SC engine.
+    Play/Stop/Prev/Next send commands to the playback engine (same action path
+    as the physical MIDI controllers).
     <strong>Load a setlist first</strong> before pressing Play.
+    Engine state: <strong>{engineState}</strong>
   </p>
 </div>
 
@@ -123,8 +127,8 @@
   <div class="row">
     <a href="/files"><button>Upload Files</button></a>
     <a href="/setlists"><button>Manage Setlists</button></a>
-    <a href="/pads"><button>APC Pads</button></a>
-    <a href="/worlde"><button>Worlde Pads</button></a>
+    <a href="/midi"><button>MIDI Map</button></a>
+    <a href="/routing"><button>Routing</button></a>
   </div>
 </div>
 

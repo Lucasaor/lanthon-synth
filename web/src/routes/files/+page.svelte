@@ -11,9 +11,8 @@
    * Upload files with progress tracking via XMLHttpRequest.
    * Supports multiple files at once.
    */
-  async function upload(type) {
-    const inputId = type === 'sample' ? 'sampleInput' : 'mediaInput';
-    const input = document.getElementById(inputId);
+  async function upload() {
+    const input = document.getElementById('mediaInput');
     if (!input?.files?.length) return;
 
     uploading = true;
@@ -21,7 +20,7 @@
     messages = [];
 
     const fd = new FormData();
-    fd.append('type', type);
+    fd.append('type', 'media');
     for (const file of input.files) {
       fd.append('file', file);
     }
@@ -74,7 +73,7 @@
 </script>
 
 <h1>File Upload</h1>
-<p class="yellow">MP3 files are automatically converted to WAV using ffmpeg. Select multiple files at once.</p>
+<p class="yellow">Upload per-song files: one multichannel WAV (L, R, Click, Cue — optional Timecode) + one companion MIDI automation file per song. Multiple files at once.</p>
 
 {#if uploading}
   <div class="progress-bar">
@@ -88,22 +87,12 @@
 {/each}
 
 <div class="card">
-  <h2>Backtrack Files (VS / Click / Cue)</h2>
-  <p>Name format: <code>Song Name (VS).mp3</code>, <code>Song Name (click).mp3</code>, <code>Song Name (Dica).mp3</code></p>
+  <h2>Song Files (WAV + MID)</h2>
+  <p>Name format: <code>Song Name.wav</code> + <code>Song Name.mid</code> (exported from Reaper).</p>
   <div class="upload-row">
-    <input id="mediaInput" type="file" accept=".mp3,.wav,.aiff" multiple disabled={uploading} />
-    <button on:click={() => upload('media')} disabled={uploading}>
-      {uploading ? 'Uploading…' : 'Upload Media'}
-    </button>
-  </div>
-</div>
-
-<div class="card">
-  <h2>Sample Files (Worlde Pads)</h2>
-  <div class="upload-row">
-    <input id="sampleInput" type="file" accept=".wav,.mp3,.aiff" multiple disabled={uploading} />
-    <button on:click={() => upload('sample')} disabled={uploading}>
-      {uploading ? 'Uploading…' : 'Upload Samples'}
+    <input id="mediaInput" type="file" accept=".wav,.flac,.aiff,.aif,.mid,.midi" multiple disabled={uploading} />
+    <button on:click={() => upload()} disabled={uploading}>
+      {uploading ? 'Uploading…' : 'Upload Files'}
     </button>
   </div>
 </div>
@@ -112,12 +101,6 @@
   <h2>Uploaded Media</h2>
   {#each data.media as f}<div>📄 {f}</div>{/each}
   {#if !data.media.length}<p style="color:#666">No media files uploaded yet.</p>{/if}
-</div>
-
-<div class="card">
-  <h2>Uploaded Samples</h2>
-  {#each data.samples as f}<div>🥁 {f}</div>{/each}
-  {#if !data.samples.length}<p style="color:#666">No samples uploaded yet.</p>{/if}
 </div>
 
 <style>

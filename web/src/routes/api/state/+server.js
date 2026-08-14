@@ -1,11 +1,11 @@
 /**
- * GET  /api/state → { activeSetlist, songName, artist, playing, tuning }
+ * GET  /api/state → { activeSetlist, songName, artist, playing, state,
+ *                     tuning, key, positionSec, durationSec, songIndex,
+ *                     songCount }
  *
- * Reads state.json written by the SuperCollider backtrack engine.
- * SC writes this file on every playback state change (play/stop/next/prev/load).
- *
- * POST /api/state is NOT used — SC is the source of truth for playback state.
- * The web dashboard sends OSC commands directly to SC, and SC updates state.json.
+ * Reads state.json written by the playback engine — the engine is the
+ * single source of truth for playback state. The web dashboard sends OSC
+ * commands to the engine, and the engine updates state.json.
  */
 import { json } from '@sveltejs/kit';
 import { readConfig } from '$lib/config.js';
@@ -19,6 +19,12 @@ export async function GET() {
     songName:      state.songName ?? null,
     artist:        state.artist ?? null,
     playing:       state.playing === true || state.playing === 'true',
+    state:         state.state ?? null,
     tuning:        state.tuning ?? null,
+    key:           state.key ?? null,
+    positionSec:   state.positionSec ?? 0,
+    durationSec:   state.durationSec ?? 0,
+    songIndex:     state.songIndex ?? 0,
+    songCount:     state.songCount ?? 0,
   });
 }

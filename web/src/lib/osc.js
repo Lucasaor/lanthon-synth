@@ -1,28 +1,29 @@
 /**
- * lib/osc.js — OSC client that sends messages to SuperCollider (sclang).
- * Uses the node-osc package. Runs server-side only.
+ * lib/osc.js — OSC client that sends commands to the playback engine
+ * (Python process listening on ENGINE_PORT, default 57120 — the port
+ * SuperCollider previously used). Uses the node-osc package. Runs
+ * server-side only.
  *
- * SC must have an OSCdef listening on SC_OSC_PORT (default 57120 — the
- * standard sclang port). The backtrack.scd file registers OSCdefs for
- * /backtrack/* and /config/* paths.
+ * The engine registers OSC handlers for /backtrack/*, /midi/* and
+ * /config/* paths (engine/osc.py).
  */
 
 import { Client } from 'node-osc';
 
-const SC_HOST = process.env.SC_HOST ?? '127.0.0.1';
-const SC_PORT = parseInt(process.env.SC_PORT ?? '57120', 10);
+const ENGINE_HOST = process.env.ENGINE_HOST ?? '127.0.0.1';
+const ENGINE_PORT = parseInt(process.env.ENGINE_PORT ?? '57120', 10);
 
 let _client = null;
 
 function getClient() {
   if (!_client) {
-    _client = new Client(SC_HOST, SC_PORT);
+    _client = new Client(ENGINE_HOST, ENGINE_PORT);
   }
   return _client;
 }
 
 /**
- * Send an OSC message to SuperCollider.
+ * Send an OSC message to the playback engine.
  * @param {string} address  OSC path, e.g. '/backtrack/play'
  * @param {...*} args       Any additional typed args
  */
