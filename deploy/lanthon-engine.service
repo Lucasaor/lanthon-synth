@@ -1,0 +1,39 @@
+# =============================================================================
+# lanthon-engine.service — LANTH0N 5YNTH playback engine (Python)
+# =============================================================================
+# Single-clock multichannel WAV + MIDI automation player. Owns the one
+# source of truth for playback state; feeds state.json (web UI) and the
+# OLED daemon via OSC. Installed to /etc/systemd/system by deploy/setup.sh.
+
+[Unit]
+Description=LANTH0N 5YNTH — playback engine (WAV + MIDI automation)
+After=network.target sound.target syslog.target lanth0n-cpugov.service
+Wants=sound.target lanth0n-cpugov.service
+
+[Service]
+Type=simple
+User=%USER%
+Group=audio
+WorkingDirectory=%PROJECT_DIR%
+Environment=LANTH0N_OFFLINE=0
+Environment=LANTH0N_OSC_PORT=57120
+Environment=LANTH0N_OLED_PORT=9000
+
+ExecStart=/usr/bin/python3 -m engine.main
+
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+
+# Realtime scheduling for the MIDI dispatcher and audio callbacks.
+LimitRTPRIO=95
+LimitNICE=-19
+
+StandardOutput=append:/var/log/lanth0n/engine.log
+StandardError=append:/var/log/lanth0n/engine.log
+SyslogIdentifier=lanth0n-engine
+
+ReadWritePaths=/var/log/lanth0n %PROJECT_DIR%/config %PROJECT_DIR%/setlists %PROJECT_DIR%/media
+
+[Install]
+WantedBy=multi-user.target

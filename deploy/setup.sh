@@ -13,7 +13,7 @@
 #   5. Install Python packages (sounddevice, soundfile, python-rtmidi,
 #      luma.oled, python-osc, Pillow)
 #   6. Build SvelteKit web interface
-#   7. Install and enable systemd services
+#   7. Install and enable systemd services (cpugov, engine, OLED, web)
 #   8. Create required directories
 #   9. Configure mDNS hostname (lanth0n.local)
 # =============================================================================
@@ -151,7 +151,7 @@ chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR" "$PROJECT_DIR"
 echo ""
 echo "=== [8/9] Installing systemd services ==="
 
-for SVC in lanth0n-cpugov lanthon-oled lanthon-web; do
+for SVC in lanth0n-cpugov lanthon-engine lanthon-oled lanthon-web; do
   TMPL="$SCRIPT_DIR/$SVC.service"
   DEST="/etc/systemd/system/$SVC.service"
   if [ -f "$TMPL" ]; then
@@ -163,9 +163,9 @@ for SVC in lanth0n-cpugov lanthon-oled lanthon-web; do
 done
 
 systemctl daemon-reload
-systemctl enable lanth0n-cpugov lanthon-oled lanthon-web
+systemctl enable lanth0n-cpugov lanthon-engine lanthon-oled lanthon-web
 echo "  Services enabled. They will auto-start on next boot."
-echo "  Start now: systemctl start lanth0n-cpugov lanthon-oled lanthon-web"
+echo "  Start now: systemctl start lanth0n-cpugov lanthon-engine lanthon-oled lanthon-web"
 
 # ── Step 9: mDNS hostname ────────────────────────────────────────────────────
 echo ""
@@ -185,7 +185,7 @@ echo ""
 echo " NEXT STEPS:"
 echo "   1. sudo reboot"
 echo "   2. After reboot:"
-echo "        sudo systemctl status lanth0n-cpugov lanthon-oled lanthon-web"
+echo "        sudo systemctl status lanth0n-cpugov lanthon-engine lanthon-oled lanthon-web"
 echo "   3. Pair the SMK25 (Bluetooth): bluetoothctl"
 echo "        power on → agent on → scan on → pair <MAC> → trust <MAC> → connect <MAC>"
 echo "        Verify MIDI: aconnect -i (should show SMK-25)"

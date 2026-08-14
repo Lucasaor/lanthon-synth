@@ -30,7 +30,10 @@ run_py_test() {
   local file="$1"
   local name="$(basename "$file" .py)"
   printf "  PY: %-30s " "$name"
-  if LANTH0N_OLED_MOCK=1 LANTH0N_OFFLINE=1 "$PY" "$file" 2>&1 | grep -qE "^OK|ALL TESTS PASSED"; then
+  # NOTE: no -q on grep — with -q, grep exits on first match and the test
+  # process gets SIGPIPE writing its trailing output, which set -o pipefail
+  # then reports as failure. Without -q grep reads all input first.
+  if LANTH0N_OLED_MOCK=1 LANTH0N_OFFLINE=1 "$PY" "$file" 2>&1 | grep -E "^OK|ALL TESTS PASSED" >/dev/null; then
     echo -e "${GREEN}PASS${NC}"
     PY_PASS=$((PY_PASS + 1))
   else
@@ -40,10 +43,12 @@ run_py_test() {
 }
 
 echo "Python tests:"
-if "$PY" -c "import pythonosc" 2>/dev/null; then
+if "$PY" -c "import pythonosc, soundfile, numpy" 2>/dev/null; then
+  run_py_test "$SCRIPT_DIR/test_smf.py"
+  run_py_test "$SCRIPT_DIR/test_engine.py"
   run_py_test "$SCRIPT_DIR/test_oled.py"
 else
-  echo -e "${YELLOW}  python-osc not installed — run: pip3 install python-osc Pillow${NC}"
+  echo -e "${YELLOW}  python packages missing — run: pip3 install python-osc soundfile numpy Pillow${NC}"
 fi
 
 echo ""

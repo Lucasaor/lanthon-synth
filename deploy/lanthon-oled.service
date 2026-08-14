@@ -2,12 +2,12 @@
 # lanthon-oled.service — LANTH0N 5YNTH OLED display daemon
 # =============================================================================
 # Drives the SSD1306 I2C OLED display (setlist/song/state monitor).
-# Must start AFTER the SC engine so OSC messages have a target.
+# Must start AFTER the playback engine so OSC messages have a target.
 
 [Unit]
 Description=LANTH0N 5YNTH — OLED display daemon
-After=network.target lanthon-synth.service
-Wants=lanthon-synth.service
+After=network.target lanthon-engine.service
+Wants=lanthon-engine.service
 
 [Service]
 Type=simple
