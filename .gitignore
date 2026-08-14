@@ -2,13 +2,6 @@
 # Lanthon Synth — .gitignore
 # =============================================================================
 
-# SuperCollider server state
-*.scsyndef
-scsynth.log
-
-# JACK logs
-jackd.log
-
 # Runtime logs
 /var/log/lanthon-synth/
 *.log
@@ -29,9 +22,6 @@ Thumbs.db
 __pycache__/
 *.py[codz]
 *.egg-info/
-
-# SuperCollider archive
-*.sc_archive
 
 rabbitmq-data/
 

@@ -6,14 +6,15 @@
 #   sudo ./deploy/setup.sh
 #
 # What it does:
-#   1. System packages: SuperCollider, JACK, Python, Node.js, ffmpeg, etc.
+#   1. System packages: Python, Node.js, portaudio, etc.
 #   2. CPU governor → performance (persistent)
 #   3. Enable I2C (for SSD1306 OLED)
 #   4. Enable Bluetooth MIDI support (for SMK25)
-#   5. Install Python packages (luma.oled, python-osc, Pillow)
+#   5. Install Python packages (sounddevice, soundfile, python-rtmidi,
+#      luma.oled, python-osc, Pillow)
 #   6. Build SvelteKit web interface
-#   7. Install and enable 3 systemd services
-#   8. Create required directories + JACK helper script
+#   7. Install and enable systemd services
+#   8. Create required directories
 #   9. Configure mDNS hostname (lanth0n.local)
 # =============================================================================
 
@@ -47,42 +48,19 @@ echo "=== [1/9] Installing system packages ==="
 apt-get update -qq
 
 # ── 1a. Core packages — must all be present in Pi OS Bookworm ───────────────
+# libportaudio2: PortAudio runtime required by python-sounddevice.
 apt-get install -y \
-  jackd2 \
+  libportaudio2 \
   python3 python3-pip python3-smbus \
   i2c-tools \
   nodejs npm \
-  ffmpeg \
   git usbutils alsa-utils \
   avahi-daemon libnss-mdns \
   bluetooth bluez
 
-# ── 1b. SuperCollider ─────────────────────────────────────────────────────────
-# Debian Bookworm splits SC into supercollider-sclang + supercollider-server.
-# Raspberry Pi OS Bookworm ships a monolithic 'supercollider' package instead.
-# Try split packages first (works on stock Debian); fall back to meta-package.
-echo "  Installing SuperCollider..."
-if apt-get install -y supercollider-sclang supercollider-server 2>/dev/null; then
-  echo "  SuperCollider installed via split packages."
-elif apt-get install -y supercollider 2>/dev/null; then
-  echo "  SuperCollider installed via meta-package."
-else
-  echo "  WARNING: SuperCollider not found in standard repos."
-  echo "  Install manually: sudo apt-get install supercollider"
-  echo "  Or see: https://supercollider.github.io/downloads"
-fi
-
-# Verify sclang is actually available
-if ! command -v sclang &>/dev/null; then
-  echo "  WARNING: sclang not in PATH after install — check SuperCollider package."
-fi
-
-# ── 1c. Optional packages — skip gracefully if not in repos ──────────────────
-# a2jmidid: ALSA-to-JACK MIDI bridge (useful but not critical)
-# bluez-tools: bt-device CLI helper
-# jack-tools: NOT available on Pi OS Bookworm (skipped)
-# cpufrequtils: NOT available on Pi OS Bookworm (CPU governor set via sysfs in Step 2)
-for pkg in a2jmidid bluez-tools; do
+# ── 1b. Optional packages — skip gracefully if not in repos ──────────────────
+# bluez-tools: bt-device CLI helper (Bluetooth MIDI transport controller)
+for pkg in bluez-tools; do
   apt-get install -y "$pkg" 2>/dev/null && \
     echo "  Installed optional package: $pkg" || \
     echo "  Optional package not available (skipped): $pkg"
@@ -145,18 +123,14 @@ echo "  After pairing, verify: aconnect -i (should show SMK-25)"
 # ── Step 5: Python packages ──────────────────────────────────────────────────
 echo ""
 echo "=== [5/9] Installing Python packages ==="
-pip3 install --break-system-packages luma.oled python-osc Pillow 2>/dev/null || \
-pip3 install luma.oled python-osc Pillow
+# sounddevice → PortAudio playback + device enumeration
+# soundfile   → streaming WAV decode (flat memory)
+# python-rtmidi → MIDI transport input + automation output
+# luma.oled / python-osc / Pillow → OLED daemon
+pip3 install --break-system-packages \
+  sounddevice soundfile python-rtmidi luma.oled python-osc Pillow 2>/dev/null || \
+pip3 install sounddevice soundfile python-rtmidi luma.oled python-osc Pillow
 echo "  Python packages installed."
-
-# ── Step 5b: Install SuperCollider JSONlib quark ─────────────────────────
-echo ""
-echo "=== [5b] Installing JSONlib quark ==="
-# JSONlib is required for setlist loading, PC snapshots, and pad configs.
-# The regex-based stubs in the SC code will fail on real JSON files.
-sclang -c 'Quarks.install("JSONlib"); Quarks.install("JSONlib");' 2>/dev/null || \
-  echo "  WARNING: JSONlib install failed — install manually: sclang -c 'Quarks.install(\"JSONlib\");'"
-echo "  JSONlib quark installed."
 
 # ── Step 6: Build SvelteKit web interface ────────────────────────────────────
 echo ""
@@ -167,78 +141,17 @@ npm run build
 echo "  Web interface built."
 cd "$PROJECT_DIR"
 
-# ── Step 7: Create directories + JACK helper (with auto-detect) ─────────────
+# ── Step 7: Create directories ─────────────────────────────────────────────
 echo ""
-echo "=== [7/9] Creating directories and JACK helper ==="
-mkdir -p "$LOG_DIR" "$PROJECT_DIR/media" "$PROJECT_DIR/samples" "$PROJECT_DIR/setlists"
+echo "=== [7/9] Creating directories ==="
+mkdir -p "$LOG_DIR" "$PROJECT_DIR/media" "$PROJECT_DIR/setlists"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR" "$PROJECT_DIR"
-
-# Auto-detect USB audio interface for JACK.
-# If no USB card found, fall back to hw:0 (onboard or first card).
-USB_CARD=$(aplay -l 2>/dev/null | grep -i usb | head -1 | sed 's/.*card \([0-9]\).*/\1/')
-USB_CARD=${USB_CARD:-0}
-echo "  USB audio card detected: hw:${USB_CARD}"
-
-# JACK start helper (called from lanthon-synth.service ExecStartPre)
-cat > /usr/local/bin/lanthon-jack-start.sh << JACKEOF
-#!/usr/bin/env bash
-# LANTH0N 5YNTH — start JACK and block until the server is actually ready.
-# Exits 0 only when jack_lsp can talk to the running server; exit 1 makes
-# systemd retry the whole service (Restart=on-failure).
-LOG=/var/log/lanth0n/jack.log
-
-# Kill stale JACK / scsynth instances and wait until they actually release
-# ALSA and their memory locks. The Pi Zero 2W is slow — a fixed sleep 1 is
-# not enough and causes "Cannot lock down memory" / ALSA-busy failures.
-pkill -9 jackd   2>/dev/null || true
-pkill -9 scsynth 2>/dev/null || true
-for i in $(seq 1 20); do
-  if pgrep -x jackd >/dev/null 2>&1 || pgrep -x scsynth >/dev/null 2>&1; then
-    sleep 0.5
-  else
-    break
-  fi
-done
-pkill -9 jackd 2>/dev/null || true
-
-# Remove stale shared-memory files from wedged servers — a leftover shm
-# region can make the next jackd hang before creating its socket.
-rm -rf /dev/shm/jack-* /dev/shm/jack_* /dev/shm/jack_db-* 2>/dev/null || true
-
-# -m = no memory locking: the Pi Zero 2W (512 MB) cannot spare the ~107 MB
-# mlock jackd requests, and a failed lock can wedge jackd startup.
-# -S = synchronous graph: jackd 1.9.22 wedges after client disconnects on
-# this Pi with the async graph ("ProcessGraphAsyncMaster: Process error").
-jackd -R -m -S -d alsa \
-  -d hw:${USB_CARD} \
-  -r 48000 \
-  -p 256 \
-  -n 2 \
-  -o 2 \
-  -i 2 \
-  &>>"$LOG" &
-
-# Wait up to 30 s for the JACK server to accept clients.
-for i in $(seq 1 60); do
-  if jack_lsp >/dev/null 2>&1; then
-    echo "$(date '+%F %T'): JACK ready after \${i} polls" >>"$LOG"
-    exit 0
-  fi
-  sleep 0.5
-done
-
-echo "$(date '+%F %T'): JACK failed to become ready in 30 s" >>"$LOG"
-exit 1
-JACKEOF
-chmod +x /usr/local/bin/lanthon-jack-start.sh
-echo "  JACK helper installed (auto-detected hw:${USB_CARD})."
-echo "  If wrong device, override: sudo nano /usr/local/bin/lanthon-jack-start.sh"
 
 # ── Step 8: Install systemd services ────────────────────────────────────────
 echo ""
 echo "=== [8/9] Installing systemd services ==="
 
-for SVC in lanth0n-cpugov lanthon-synth lanthon-oled lanthon-web; do
+for SVC in lanth0n-cpugov lanthon-oled lanthon-web; do
   TMPL="$SCRIPT_DIR/$SVC.service"
   DEST="/etc/systemd/system/$SVC.service"
   if [ -f "$TMPL" ]; then
@@ -250,9 +163,9 @@ for SVC in lanth0n-cpugov lanthon-synth lanthon-oled lanthon-web; do
 done
 
 systemctl daemon-reload
-systemctl enable lanth0n-cpugov lanthon-synth lanthon-oled lanthon-web
+systemctl enable lanth0n-cpugov lanthon-oled lanthon-web
 echo "  Services enabled. They will auto-start on next boot."
-echo "  Start now: systemctl start lanth0n-cpugov lanthon-synth lanthon-oled lanthon-web"
+echo "  Start now: systemctl start lanth0n-cpugov lanthon-oled lanthon-web"
 
 # ── Step 9: mDNS hostname ────────────────────────────────────────────────────
 echo ""
@@ -272,13 +185,11 @@ echo ""
 echo " NEXT STEPS:"
 echo "   1. sudo reboot"
 echo "   2. After reboot:"
-echo "        sudo systemctl status lanth0n-cpugov lanthon-synth lanthon-oled lanthon-web"
-echo "        sudo journalctl -u lanthon-synth -f"
+echo "        sudo systemctl status lanth0n-cpugov lanthon-oled lanthon-web"
 echo "   3. Pair the SMK25 (Bluetooth): bluetoothctl"
 echo "        power on → agent on → scan on → pair <MAC> → trust <MAC> → connect <MAC>"
 echo "        Verify MIDI: aconnect -i (should show SMK-25)"
 echo "   4. Verify OLED I2C: i2cdetect -y 1 (should show 0x3C)"
-echo "   5. Run calibration: sclang src/calibration.scd"
-echo "   6. Open web UI from another device: http://lanth0n.local:5000"
-echo "   7. Upload media files, create a setlist, and play"
+echo "   5. Open web UI from another device: http://lanth0n.local:5000"
+echo "   6. Upload WAV + MID files, create a setlist, and play"
 echo ""

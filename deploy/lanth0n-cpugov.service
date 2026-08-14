@@ -6,12 +6,12 @@
 # governor causes xruns when the CPU momentarily downclocks.
 #
 # Uses a Type=oneshot service that exits after setting, via Before= ordering
-# in lanthon-synth.service. Installed by deploy/setup.sh.
+# in lanthon-engine.service. Installed by deploy/setup.sh.
 
 [Unit]
 Description=Set CPU governor to performance
 DefaultDependencies=false
-Before=lanth0n-synth.service
+Before=lanthon-engine.service
 
 [Service]
 Type=oneshot
@@ -19,4 +19,4 @@ ExecStart=/bin/sh -c 'for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_go
 RemainAfterExit=yes
 
 [Install]
-WantedBy=lanth0n-synth.service
+WantedBy=lanthon-engine.service
