@@ -12,9 +12,10 @@
     const r = await fetch(`/api/setlists/${name}`);
     editing = await r.json();
     editing._name = name;
-    // Ensure songs have file fields and tuning defaults
+    // Ensure songs have file fields and tuning defaults.
+    // VS and Dica are optional and default to "none" until auto-detect resolves them.
     editing.songs = (editing.songs ?? []).map(s => {
-      const song = { vs: '', click: '', dica: '', tuning: 'standard', key: 'E', ...s };
+      const song = { vs: 'none', click: '', dica: 'none', tuning: 'standard', key: 'E', ...s };
       delete song.tempo;   // legacy BPM field no longer used
       return song;
     });
@@ -54,7 +55,17 @@
 
   function addSong() {
     editing.songs = [...(editing.songs ?? []),
-      { name: 'New Song', artist: '', tuning: 'standard', key: 'E', vs: '', click: '', dica: '' }];
+      { name: 'New Song', artist: '', tuning: 'standard', key: 'E', vs: 'none', click: '', dica: 'none' }];
+  }
+
+  /** Move a song up (-1) or down (+1) in the setlist. */
+  function moveSong(i, dir) {
+    const songs = editing.songs ?? [];
+    const j = i + dir;
+    if (j < 0 || j >= songs.length) return;
+    editing.songs = songs.slice();
+    const song = editing.songs.splice(i, 1)[0];
+    editing.songs.splice(j, 0, song);
   }
 
   async function activateSetlist(name) {
@@ -75,21 +86,32 @@
   }
 
   /**
-   * Auto-fill the Click dropdown based on the song name.
+   * Auto-detect VS/Click/Dica files based on the song name.
    * Searches media files for matches like:
-   *   "Song Name (click).wav"  → click
-   * Only fills empty fields (doesn't overwrite manual selections).
-   * VS and Dica are optional and are never auto-filled.
+   *   "Song Name (VS).wav"    → VS
+   *   "Song Name (click).wav" → click
+   *   "Song Name (Dica).wav"  → Dica
+   * Only fills fields that have no explicit selection yet ("", "none").
+   * If no VS or Dica file is found, the field is left as "none" (optional tracks).
    */
   function autoFillFiles(song) {
     if (!song?.name) return;
     const lower = song.name.toLowerCase();
+    const found = { vs: null, click: null, dica: null };
 
     for (const f of mediaFiles) {
       const fLower = f.toLowerCase();
       if (!fLower.includes(lower)) continue;
-      if (fLower.includes('(click)')) {
-        if (!song.click) { song.click = f; }   // only auto-fill empty
+      if (!found.vs    && fLower.includes('(vs)'))    { found.vs    = f; }
+      if (!found.click && fLower.includes('(click)')) { found.click = f; }
+      if (!found.dica  && fLower.includes('(dica)'))  { found.dica  = f; }
+    }
+
+    for (const key of ['vs', 'click', 'dica']) {
+      const current = song[key];
+      if (current === undefined || current === '' || current === 'none') {
+        // VS/Dica fall back to "none"; click falls back to auto-detect ("")
+        song[key] = found[key] ?? (key === 'click' ? '' : 'none');
       }
     }
   }
@@ -126,6 +148,8 @@
     <div class="card" style="padding:10px; margin-bottom:8px">
       <div class="row">
         <span style="color:#aaa">#{i+1}</span>
+        <button on:click={() => moveSong(i, -1)} disabled={i === 0} title="Move up">▲</button>
+        <button on:click={() => moveSong(i, 1)} disabled={i === (editing.songs?.length ?? 1) - 1} title="Move down">▼</button>
         <input bind:value={song.name} placeholder="Song name" style="flex:2"
           on:input={() => autoFillFiles(song)} />
         <input bind:value={song.artist} placeholder="Artist" style="flex:2" />

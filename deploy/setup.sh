@@ -182,17 +182,53 @@ echo "  USB audio card detected: hw:${USB_CARD}"
 # JACK start helper (called from lanthon-synth.service ExecStartPre)
 cat > /usr/local/bin/lanthon-jack-start.sh << JACKEOF
 #!/usr/bin/env bash
-pkill jackd 2>/dev/null || true
-sleep 1
-jackd -R -d alsa \
+# LANTH0N 5YNTH — start JACK and block until the server is actually ready.
+# Exits 0 only when jack_lsp can talk to the running server; exit 1 makes
+# systemd retry the whole service (Restart=on-failure).
+LOG=/var/log/lanth0n/jack.log
+
+# Kill stale JACK / scsynth instances and wait until they actually release
+# ALSA and their memory locks. The Pi Zero 2W is slow — a fixed sleep 1 is
+# not enough and causes "Cannot lock down memory" / ALSA-busy failures.
+pkill -9 jackd   2>/dev/null || true
+pkill -9 scsynth 2>/dev/null || true
+for i in $(seq 1 20); do
+  if pgrep -x jackd >/dev/null 2>&1 || pgrep -x scsynth >/dev/null 2>&1; then
+    sleep 0.5
+  else
+    break
+  fi
+done
+pkill -9 jackd 2>/dev/null || true
+
+# Remove stale shared-memory files from wedged servers — a leftover shm
+# region can make the next jackd hang before creating its socket.
+rm -rf /dev/shm/jack-* /dev/shm/jack_* /dev/shm/jack_db-* 2>/dev/null || true
+
+# -m = no memory locking: the Pi Zero 2W (512 MB) cannot spare the ~107 MB
+# mlock jackd requests, and a failed lock can wedge jackd startup.
+# -S = synchronous graph: jackd 1.9.22 wedges after client disconnects on
+# this Pi with the async graph ("ProcessGraphAsyncMaster: Process error").
+jackd -R -m -S -d alsa \
   -d hw:${USB_CARD} \
   -r 48000 \
   -p 256 \
   -n 2 \
   -o 2 \
   -i 2 \
-  &>/var/log/lanth0n/jack.log &
-sleep 2
+  &>>"$LOG" &
+
+# Wait up to 30 s for the JACK server to accept clients.
+for i in $(seq 1 60); do
+  if jack_lsp >/dev/null 2>&1; then
+    echo "$(date '+%F %T'): JACK ready after \${i} polls" >>"$LOG"
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "$(date '+%F %T'): JACK failed to become ready in 30 s" >>"$LOG"
+exit 1
 JACKEOF
 chmod +x /usr/local/bin/lanthon-jack-start.sh
 echo "  JACK helper installed (auto-detected hw:${USB_CARD})."

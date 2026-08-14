@@ -168,6 +168,35 @@ s.waitForBoot({
 });
 
 // =============================================================================
+// SERVER WATCHDOG
+// =============================================================================
+// Runs OUTSIDE the s.waitForBoot callback so it also guards the initial boot.
+// If scsynth dies (e.g. JACK was not ready when it started, or a USB audio
+// disconnect), reboot it. The pending waitForBoot action above fires as soon
+// as the server finally boots, so the whole rig initialises automatically.
+~serverWatchdog = {
+	var cooldown = 0;
+	AppClock.sched(10.0, {
+		if (s.serverRunning.not, {
+			if (cooldown <= 0, {
+				cooldown = 6;   // 60 s between reboot attempts (boot can be slow)
+				"[WATCHDOG] scsynth not running — attempting reboot".postln;
+				try { s.reboot; }
+				{ |err| "[WATCHDOG] reboot error: %".format(err).postln; };
+			}, {
+				cooldown = cooldown - 1;
+				"[WATCHDOG] waiting for server boot (attempts in % s)".format(
+					cooldown * 10).postln;
+			});
+		}, {
+			cooldown = 0;
+		});
+		10.0
+	});
+};
+~serverWatchdog.();
+
+// =============================================================================
 // CLEAN SHUTDOWN
 // =============================================================================
 

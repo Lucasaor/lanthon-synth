@@ -26,6 +26,7 @@ ExecStart=/usr/bin/sclang -D %PROJECT_DIR%/src/main.scd
 
 Restart=on-failure
 RestartSec=5
+TimeoutStartSec=180
 
 StandardOutput=append:/var/log/lanth0n/synth.log
 StandardError=append:/var/log/lanth0n/synth.log
