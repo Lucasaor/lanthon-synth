@@ -47,6 +47,7 @@ if "$PY" -c "import pythonosc, soundfile, numpy" 2>/dev/null; then
   run_py_test "$SCRIPT_DIR/test_smf.py"
   run_py_test "$SCRIPT_DIR/test_devices.py"
   run_py_test "$SCRIPT_DIR/test_engine.py"
+  run_py_test "$SCRIPT_DIR/test_midi_io.py"
   run_py_test "$SCRIPT_DIR/test_oled.py"
 else
   echo -e "${YELLOW}  python packages missing — run: pip3 install python-osc soundfile numpy Pillow${NC}"

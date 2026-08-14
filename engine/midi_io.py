@@ -330,6 +330,7 @@ class LearnCapture:
                 return False
             self.active = False
         try:
+            MIDI_LEARN_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(MIDI_LEARN_FILE, "w", encoding="utf-8") as f:
                 json.dump(ev, f)
             log.info("MIDI learn: captured ch%d %s %d",
