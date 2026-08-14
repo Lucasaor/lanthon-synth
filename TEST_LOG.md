@@ -92,15 +92,41 @@ WAV + MIDI automation player. Evidence per build step (dev machine,
 - README/DEPLOY/CONTROLS/TEST_LOG/AGENTS rewritten to the new architecture;
   signal-routing diagram validated (mermaid).
 
-## Step 9 — Deployment to the Pi (real hardware)
+## Step 9 — Deployment to the Pi (real hardware) — DONE
 
-- **PENDING** — `lanth0n.local` not reachable from the dev machine at the
-  time of writing. Plan: `git push`, SSH to the Pi, `git pull`, run
-  `sudo ./deploy/setup.sh`, restart services, then verify on real hardware:
-  - real setlist with WAV+MID pairs,
-  - controller transport + web UI + OLED agreement,
-  - routing against the real USB interface,
-  - `journalctl -u lanthon-engine` clean, memory flat.
+- Git history pushed to `origin/main` (11 scoped commits: step0 audit,
+  SC removal, engine, routing backend, web scope, MIDI mapping, OLED,
+  routing UI, docs, deploy fixes, legacy migration).
+- Pi (`L4NTH0N-5YNTH`, aarch64, Debian trixie) updated via `git reset
+  --hard origin/main`; runtime data preserved (`media/`, `setlists/`,
+  `config/midi_map.json` restored from backup; old config backed up to
+  `~/lanthon-backup/`).
+- SuperCollider/JACK purged from the Pi (`supercollider*`, `jackd*`,
+  `a2jmidid`, `libscsynth1t64`, old unit + JACK helper removed).
+- `sudo ./deploy/setup.sh` completed: 4 systemd units installed/enabled,
+  hostname preserved (`L4NTH0N-5YNTH`). Fixes needed during deploy:
+  `build-essential`/`python3-dev`/`libasound2-dev` for the python-rtmidi
+  source build (no aarch64 wheel for Python 3.13) and keeping ffmpeg
+  (used by the migration).
+- **Real setlist migrated**: `deploy/migrate_legacy.py` merged the legacy
+  split VS/Click/Dica tracks into single 4-ch 48 kHz WAVs per song and
+  rewrote the setlist to `wav`/`mid` (`.json.legacy` backup kept).
+- **Hardware verification on the Pi**:
+  - services `active` ×4; engine log: audio stream opened on the real
+    CS202, MIDI input ports opened (incl. WORLDE controller), 5 transport
+    mappings loaded, real setlist auto-loaded and song cued
+    (4 ch, 124.1 s).
+  - engine RSS: **42.5 MB** (flat — the old rig OOMed this hardware).
+  - web API: `/api/health` online; play → `positionSec` advancing →
+    stop; `/api/devices` shows live CS202 + MIDI ports.
+  - OLED log: `CUED → PLAYING → STOP` with artist/song/tuning — web UI,
+    engine, and OLED agree through one state.json.
+- **Remaining for the next rehearsal (needs human hands/ears)**: pressing
+  the physical controller buttons (the mapped WORLDE CCs are loaded; the
+  same actions as the web path were verified via virtual ports in Step 5),
+  hearing the merged tracks through the PA, and adding per-song `.mid`
+  automation files (none exist yet — they are authored in Reaper and
+  uploaded via the Files page).
 
 ## Notes / known limitations
 
