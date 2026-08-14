@@ -1,7 +1,7 @@
 # DEPLOY.md — LANTH0N 5YNTH Deployment Guide
 
-How to go from a **fresh Raspberry Pi OS Bookworm Lite** to a fully functional
-headless boot of LANTH0N 5YNTH with three auto-starting services.
+From a **fresh Raspberry Pi OS Lite** to a fully functional headless
+playback rig with four auto-starting services.
 
 ---
 
@@ -10,242 +10,114 @@ headless boot of LANTH0N 5YNTH with three auto-starting services.
 | Item | Notes |
 |------|-------|
 | Raspberry Pi Zero 2W | 512 MB RAM, quad-core Cortex-A53 |
-| Raspberry Pi OS **Bookworm Lite** (64-bit) | No desktop needed |
-| USB audio interface (class-compliant, ≥4 outputs) | FOH = ch 1–2, IEM = ch 3–4 |
-| SSD1306 OLED (0.96", I2C, SDA/SCL on GPIO 2/3) | Optional but recommended |
-| Powered USB hub | Required (Pi has one OTG port) |
-| AKAI APC Mini **v2** | USB, plugged into hub |
-| Worlde Easypad 12 | USB, plugged into hub |
-| M-VAVE SMK 25 | Bluetooth MIDI |
+| Raspberry Pi OS **Bookworm/Trixie Lite** (64-bit) | No desktop needed |
+| USB audio interface (class-compliant, ≥4 outputs recommended) | Playback L/R + Click + Cue |
+| USB MIDI controller | transport buttons (Play/Stop/Next/Prev) |
+| USB MIDI output for automation | can be a port on the audio interface or a separate device |
+| SSD1306 OLED (0.96", I2C on GPIO 2/3) | Optional but recommended |
+| Powered USB hub | Recommended (Pi has one OTG port) |
 | Internet access on Pi | For initial package installation |
 
----
-
-## Quick Start (Automated)
+## Fresh install
 
 ```bash
-# 1. Flash Raspberry Pi OS Bookworm Lite to SD card with SSH enabled
-#    (use Raspberry Pi Imager, set hostname=lanth0n, enable SSH, set user=pi)
+# 1. Flash Raspberry Pi OS Lite with SSH enabled
+#    (Raspberry Pi Imager: set hostname, user, WiFi)
 
-# 2. SSH into the Pi after first boot
-ssh pi@lanth0n.local
-
-# 3. Clone the repo
+# 2. SSH in and clone
+ssh <user>@<pi>.local
 git clone https://github.com/lucasaor/lanthon-synth.git
 cd lanthon-synth
 
-# 4. Run the automated setup (takes ~5-10 min)
+# 3. Automated setup (installs packages, builds the web UI,
+#    installs + enables all systemd services)
 sudo ./deploy/setup.sh
 
-# 5. Configure the JACK audio device (find your device index)
-aplay -l                  # find your USB audio interface
-sudo nano /usr/local/bin/lanthon-jack-start.sh
-# Change: -d alsa -d hw:USB  →  -d alsa -d hw:N  (N = device index)
+# 4. Reboot
+sudo reboot
+```
 
-# 6. Pair the SMK25 Bluetooth keyboard (first time only)
+## Services
+
+| Service | What it runs | Ports |
+|---|---|---|
+| `lanth0n-cpugov` | sets CPU governor = performance (oneshot) | — |
+| `lanthon-engine` | playback engine — `python3 -m engine.main` | OSC in 57120, OLED out 9000 |
+| `lanthon-oled` | OLED display daemon — `oled_daemon.py` | OSC in 9000 |
+| `lanthon-web` | SvelteKit web UI | HTTP 5000 |
+
+Check / follow logs:
+
+```bash
+sudo systemctl status lanthon-engine lanthon-oled lanthon-web
+sudo journalctl -u lanthon-engine -f        # engine log
+tail -f /var/log/lanth0n/engine.log /var/log/lanth0n/oled.log /var/log/lanth0n/web.log
+```
+
+Healthy boot: engine logs `Engine started (offline=False, sr=48000...)` +
+`OSC control server on 0.0.0.0:57120` + `Cued song ...` (if a setlist was
+auto-loaded). Web UI shows `🔊 ENGINE ONLINE` within ~15 s.
+
+## First-run configuration
+
+1. Open `http://<pi>.local:5000`.
+2. **Files** — upload each song's multichannel WAV + MID files.
+3. **Setlists** — create a setlist; per song pick WAV, MID, tuning, key.
+   Press "Load to Rig".
+4. **Routing** — for each track (Playback L/R, Click, Cue, Timecode,
+   MIDI automation) choose the connected device + channel. Save. If a
+   device is missing from the list it is simply not connected — plug it
+   in and the list refreshes within ~5 s (no restart).
+5. **MIDI Map** — Start Learning, press the controller button, assign
+   Play / Stop / Next / Prev.
+6. **Play** from the dashboard or the controller.
+
+## Pairing a Bluetooth MIDI controller (optional)
+
+```bash
 bluetoothctl
   power on
   agent on
   scan on
-  # Wait for "SMK-25" to appear in the scan output
-  pair <MAC_ADDRESS>
-  trust <MAC_ADDRESS>
-  connect <MAC_ADDRESS>
+  # wait for the controller in the scan output
+  pair <MAC> && trust <MAC> && connect <MAC>
   exit
-
-# 7. Reboot
-sudo reboot
-
-# 8. After reboot (~30 seconds), check service status
-sudo systemctl status lanth0n-synth lanth0n-oled lanth0n-web
+# verify it appears as an ALSA MIDI port:
+aconnect -i
 ```
 
----
+The engine opens every available MIDI input port (refreshed every 2 s),
+so the controller needs no further configuration.
 
-## Services Overview
-
-After installation, three `systemd` services run on boot:
-
-| Service             | Description                                  | Port |
-|---------------------|----------------------------------------------|------|
-| `lanth0n-synth`     | SuperCollider audio engine (sclang)          | 57120 (OSC) |
-| `lanth0n-oled`      | Python OLED display daemon                   | 9000 (OSC in) |
-| `lanth0n-web`       | SvelteKit web configuration UI               | 5000 (HTTP) |
-
-> The loop engine (`src/loops.scd`) runs **inside** `lanth0n-synth` — it is loaded by `main.scd` and shares the same process.
-
-Manage services:
-```bash
-sudo systemctl status lanth0n-synth     # check status
-sudo systemctl restart lanth0n-synth    # restart after config change
-sudo journalctl -u lanth0n-synth -f     # live logs
-sudo systemctl stop lanth0n-web         # stop web UI during performance
-```
-
----
-
-## Audio Routing
-
-The Pi requires a class-compliant USB audio interface with **at least 4 output channels**.
-
-| SC Bus | Physical Channels | Destination |
-|--------|-----------------|-------------|
-| 0–1    | 1–2             | FOH (main PA / VS backtrack) |
-| 2–3    | 3–4             | IEM (click + cue, monitor only) |
-
-JACK is configured in `/usr/local/bin/lanthon-jack-start.sh`. Key flags:
-```bash
-jackd -R -d alsa \
-  -d hw:USB \    # ← change to hw:N matching your interface (aplay -l)
-  -r 44100 \
-  -p 256 \       # buffer size: lower = less latency, more risk of xruns
-  -n 2 \         # number of JACK periods
-  -o 4 \         # 4 output channels
-  -i 2
-```
-
----
-
-## I2C OLED Wiring (SSD1306)
-
-| OLED Pin | Pi GPIO Pin | Pi Physical Pin |
-|----------|-------------|-----------------|
-| VCC      | 3.3V        | Pin 1           |
-| GND      | GND         | Pin 6           |
-| SDA      | GPIO 2      | Pin 3           |
-| SCL      | GPIO 3      | Pin 5           |
-
-Verify detection: `i2cdetect -y 1` → should show `3c` at address 0x3C.
-
-The OLED address can be changed via `LANTH0N_I2C_ADDR` env var in
-`/etc/systemd/system/lanth0n-oled.service`.
-
----
-
-## Bluetooth MIDI (SMK25 Pairing)
-
-1. Pair once with `bluetoothctl` (see Quick Start above).
-2. The `auto-connect` feature in bluez should reconnect on boot.
-3. If it doesn't auto-reconnect, add a post-boot connect script:
-   ```bash
-   # /etc/rc.local (add before "exit 0"):
-   sleep 15 && bluetoothctl connect <SMK25_MAC> &
-   ```
-4. The MIDI routing code auto-detects the SMK25 when it connects and
-   re-registers handlers. No manual restart required.
-
----
-
-## CPU Performance Governor
-
-The setup script sets the CPU to `performance` mode persistently via `/etc/rc.local`.
-Verify: `cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor` → should print `performance`.
-
----
-
-## Post-Deployment Calibration
-
-After the rig is running, run the calibration tool to capture real MIDI mappings:
+## Updating an installed rig
 
 ```bash
-# On the Pi (SSH):
-sclang src/calibration.scd
-
-# Then press every button/fader/pad/knob on each controller.
-# Copy the srcID values and note/CC numbers into CONTROLS.md.
-# Update the device name fragments in src/midi_routing.scd if needed.
-# For SMK25 knob CCs: update ~smkKnobMap in src/midi_routing.scd or
-#   use the web MIDI-learn page at http://lanth0n.local:5000/midi
-```
-
-## Initial Configuration
-
-After calibration, configure the rig via the web interface:
-
-1. **Upload samples** for Worlde pads and SMK25 pads (Files page).
-2. **Create a setlist** with at least one song to test backtrack (Setlists page).
-3. **Assign Worlde pad samples** (Worlde Pads page).
-4. **Assign SMK25 pad samples** (SMK25 Pads page) if using pad samples.
-5. **Verify SMK25 knob CCs** match the defaults in CONTROLS.md (MIDI Map page).
-6. **Set APC Mini loop length** on row 7 (default: pad 1 = 2 bars).
-
----
-
-## Updating the Rig
-
-```bash
-cd ~/lanthon-synth
+cd lanthon-synth
 git pull
-# Rebuild web interface if web/ changed:
-cd web && npm install && npm run build && cd ..
-# Restart services:
-sudo systemctl restart lanth0n-synth lanth0n-oled lanth0n-web
+sudo ./deploy/setup.sh            # re-runs installs, rebuilds web, reinstalls units
+sudo systemctl restart lanthon-engine lanthon-web lanthon-oled
 ```
 
----
+## Troubleshooting
 
-## Log Locations
+| Symptom | Check |
+|---|---|
+| Engine restarts in a loop | `journalctl -u lanthon-engine -e` — usually a missing Python package or a bad WAV sample rate (engine requires 48 kHz renders) |
+| `🔇 ENGINE OFFLINE` in web UI | engine heartbeat stale — check `lanthon-engine` service + `config/state.json` `engineHeartbeat` |
+| No sound on one track | `/routing`: device present? channel within the device's channel count? WAV has that channel? |
+| Wrong pitch/speed | WAV sample rate ≠ 48 kHz — re-export from Reaper at 48000 Hz |
+| MIDI automation missing | setlist song has a `mid` file, `/routing` MIDI automation device matches a connected MIDI out |
+| OLED blank | `i2cdetect -y 1` should show `0x3C`; check `lanthon-oled` log |
+| Controller ignored | mapping exists (`/midi`), controller shows under "MIDI in" on `/routing`, channel matches the mapping |
 
-| Log file                         | Contents                    |
-|----------------------------------|-----------------------------|
-| `/var/log/lanth0n/synth.log`     | SuperCollider output + errors |
-| `/var/log/lanth0n/oled.log`      | OLED daemon output          |
-| `/var/log/lanth0n/web.log`       | Web interface output        |
-| `/var/log/lanth0n/jack.log`      | JACK audio server output    |
+## USB device hot-swap behaviour
 
-Tail all logs:
-```bash
-tail -f /var/log/lanth0n/*.log
-```
-
----
-
-## Known Package Differences: Pi OS vs Debian Bookworm
-
-The setup script handles these automatically, but here is what differs:
-
-| Package            | Debian Bookworm | Pi OS Bookworm | Notes |
-|--------------------|-----------------|----------------|-------|
-| `supercollider-sclang` | ✓ available | ✗ not split | Installed as `supercollider` meta-package |
-| `supercollider-server` | ✓ available | ✗ not split | Same as above |
-| `jack-tools`       | ✓ available     | ✗ not in repos | Not needed — `jackd2` provides all runtime tools |
-| `cpufrequtils`     | ✓ available     | ✗ not in repos | Not needed — CPU governor set via `/sys/` directly |
-| `a2jmidid`         | ✓ available     | ✓ available    | ALSA→JACK MIDI bridge (optional but recommended) |
-
-If `sclang` is missing after install, verify with:
-```bash
-which sclang        # should print /usr/bin/sclang
-sclang --version    # should print a version number
-```
-
-If `sclang` is not present, install SuperCollider manually:
-```bash
-sudo apt-get install supercollider
-# If still not found, check if sclang is provided by the package:
-dpkg -L supercollider | grep sclang
-```
-
----
-
-## Troubleshooting Boot Issues
-
-```bash
-# Check all service statuses at once
-sudo systemctl status lanth0n-synth lanth0n-oled lanth0n-web
-
-# Check JACK
-cat /var/log/lanth0n/jack.log
-
-# Verify OLED I2C
-i2cdetect -y 1
-
-# Check audio devices
-aplay -l && arecord -l
-
-# Verify CPU governor
-cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
-
-# Check BT
-bluetoothctl show | grep Powered
-```
-
+- The engine re-enumerates audio + MIDI devices every 5 s and the routing
+  screen polls every 3 s — plugging a **different interface** is visible
+  immediately and you can re-map tracks on the spot.
+- If the configured device is missing, tracks **fall back to the default
+  output** (the routing screen shows a warning). Re-assign and Save when
+  the replacement device appears.
+- If the interface in use is unplugged mid-song, PortAudio reports an
+  error and the systemd unit restarts the engine (`Restart=on-failure`).
+  On a live rig, prefer to re-map before physically swapping.

@@ -1,132 +1,99 @@
 # LANTH0N 5YNTH — Agent Instructions
 
-Headless real-time live-performance instrument: SuperCollider audio engine + SvelteKit web UI + Python OLED daemon, all running on a **Raspberry Pi Zero 2W** (512 MB RAM, headless, no screen).
+Headless live-playback rig: Python playback engine (multichannel WAV +
+MIDI automation, one clock) + SvelteKit web UI + Python OLED daemon, all
+on a **Raspberry Pi Zero 2W** (512 MB RAM, headless). **No synthesis
+anywhere** — synthesis lives on a separate board, out of scope.
 
-See [README.md](README.md) for hardware overview and [prompt.md](prompt.md) for the full specification, step-by-step build plan, and deliverables list.
-
----
+See [README.md](README.md) for the architecture, [prompt.md](prompt.md)
+for the full rewrite spec, [AUDIT.md](AUDIT.md) for the pre-rewrite audit,
+and [TEST_LOG.md](TEST_LOG.md) for verification evidence.
 
 ## Architecture
 
 | Component | Entry point | Service |
 |-----------|-------------|---------|
-| SC audio engine | `src/main.scd` → loads all `src/*.scd` | `lanthon-synth.service` |
-| OLED display daemon | `oled_daemon.py` (Python, luma.oled) | `lanthon-oled.service` |
+| Playback engine | `python3 -m engine.main` | `lanthon-engine.service` |
+| OLED display daemon | `oled_daemon.py` (luma.oled) | `lanthon-oled.service` |
 | Web config UI | `web/` (SvelteKit, port 5000) | `lanthon-web.service` |
 | CPU governor | — | `lanth0n-cpugov.service` |
 
-SC `src/` file responsibilities:
+Engine modules (`engine/`):
 
-| File | Responsibility |
-|------|----------------|
-| `main.scd` | Boot, SC server config, `executeFile` all others, OSC server |
-| `synths.scd` | SynthDefs: 6 oscillators + effect chain + sample voice |
-| `midi_routing.scd` | MIDI handlers for all 3 controllers, device watcher |
-| `apc_pads.scd` | FX pad + Program Change pad state machines |
-| `apc_leds.scd` | APC Mini v2 LED colour feedback |
-| `loops.scd` | Metronome row + 8-track loop recording engine |
-| `backtrack.scd` | Disk-streaming backtrack player + setlist engine |
-| `clock.scd` | Shared `TempoClock` + click voice |
-| `calibration.scd` | Step 0: MIDI discovery & calibration tool |
+| Module | Responsibility |
+|--------|----------------|
+| `main.py` | entry point — always run as `python3 -m engine.main` |
+| `engine.py` | `Engine`: transport wiring, block renderer, MIDI dispatch, OSC handlers |
+| `song.py` | `Song`: one WAV + one MID per song, streamed (SoundFile block reads) |
+| `smf.py` | SMF parser: ticks → frames via the file's own tempo map |
+| `devices.py` | live audio/MIDI enumeration + routing resolver (DevicePlans) |
+| `midi_io.py` | transport mapping (midi_map.json), MIDI-learn, dispatcher thread |
+| `osc.py` | OSC control server :57120 + OLED sender :9000 |
+| `transport.py` | single source of truth: stopped/cued/playing + position frame |
+| `statefile.py` | `config/state.json` writer + last-setlist persistence |
 
-Config files: [config/](config/) — `midi_map.json`, `pads_worlde.json`, `pads_smk.json`, `pc_snapshots.json`, `audio_routing.json`.  
-Setlists: [setlists/](setlists/) — JSON files edited via web UI.
+Config: `config/audio_routing.json` (per-track device+channel),
+`config/midi_map.json` (channel-based transport mappings). Runtime files
+written by the engine: `state.json`, `devices.json`, `midi_learn.json`,
+`last_setlist.txt`. Setlists: `setlists/*.json` (song = name, artist,
+tuning, key, wav, mid).
 
----
+## Non-negotiable constraints
 
-## Critical SuperCollider Pitfalls
+1. **No SuperCollider, no synthesis, no sample playback.** Nothing may
+   reintroduce audio generation — the engine only streams + routes.
+2. **One audio file + one MIDI file per song**, both driven by the same
+   transport frame counter. Never split a song across files/processes.
+3. **Sample-accurate sync** — audio blocks and MIDI dispatch both derive
+   from `Transport.position_frame`; offline tests assert 0-frame error.
+4. **Memory-safe streaming** — `SoundFile.read` per block, never load
+   whole songs; memory tests gate this (`test_engine.py`).
+5. **One source of truth** — the engine writes `config/state.json`;
+   web UI reads it, never holds its own playback state.
+6. **Hot-pluggable devices** — routing stores device *names* from the
+   live snapshot (`config/devices.json`), never hardcoded indexes.
 
-**These will silently break or hang the system — read before touching any `.scd` file.**
+## Engine protocol (web UI depends on this)
 
-1. **`^` (return) HANGS** SC 3.13.0 when run via `executeFile`/`sclang -e`. Avoid `^` everywhere; use `if/else` nesting instead.
-2. **`var` after a statement** is a parse error in `executeFile`. All `var`/`arg` declarations must be at the top of their block.
-3. **`try { Json.parse }` does NOT catch "Class not defined"** (JSONlib missing). Guard with `\Json.asClass` (returns nil safely). JSONlib is NOT installed on the Pi — all JSON paths use fallback regex parsers.
-4. **`synths.scd` must NOT reassign `~synthSendBus`** — `main.scd` allocates the bus; assigning `nil` clobbers it.
-5. **`executeFile` reports only the FIRST syntax error.** Fix iteratively.
-6. **`pads.do { |pad| ... }` sugar**: closing is `}` only — do not add `});`.
-7. Boot is healthy when the log contains `[MIDI] Initialization complete.` + `RIG READY`.
+- OSC in `udp:57120`: `/backtrack/play|stop|next|prev`,
+  `/backtrack/load <name>`, `/midi/reload`, `/midi/learn/start|stop|cancel`,
+  `/config/routing_reload`, `/devices/refresh`.
+- OSC out `udp:9000`: `/oled/update <setlist> <artist> <song> <STATE> <tuning>`,
+  `/oled/heartbeat <online:int> <playing:int>`.
+- `state.json` heartbeat: refreshed every 5 s; web `/api/health` treats
+  > 15 s as offline.
 
----
+## Key behaviours
 
-## Key Global State (SC)
+- Next/Prev pre-cues the adjacent song in a background worker; switching
+  **during playback auto-plays** the new song.
+- `play()` before the cue finishes latches (`Transport._pending_play`).
+- Transport `set_song` must NOT call `self.stop()` (plain Lock deadlock).
+- Old songs close after a 500 ms deferral (in-flight C-level reads).
+- CC transport triggers need a rising edge ≥ 64; notes trigger on
+  velocity > 0.
+- `SimpleUDPClient.send_message` takes ONE value — pack multiple OSC args
+  in a list.
 
-| Global | Description |
-|--------|-------------|
-| `~synthSendBus` | Private bus: voices → masterFX Ndef |
-| `~mainOutBus` (0) | FOH stereo output |
-| `~iemOutBus` (0) | IEM/monitor (shares main on CS202 2-ch interface) |
-| `~fxPadState[row][col]` | `\off \| \idle \| \active` (rows 0–5, cols 0–5) |
-| `~pcPadState[0-11]` | `\empty \| \saved \| \active` |
-| `~loopState[0-7]` | `\empty \| \waiting \| \recording \| \playing \| \paused` |
-| `~loopLength` | 1–8 bars |
-| `~lanth0nVoices` | SMK25 8-voice polyphonic pool |
-| `~apcNotesVoices` | APC Notes Mode 8-voice pool (separate) |
-| `~voiceParams` | IdentityDictionary of live voice params |
-| `~smkKnobMap` | IdentityDictionary[CC → paramSym] (MIDI-learn configurable) |
-
----
-
-## Non-Negotiable Constraints
-
-1. **No Sonic Pi.** Use `sclang`/`scsynth` directly.
-2. **Backtracks stream from disk** (`VDiskIn`) — never load full audio files into RAM.
-3. **Every `MIDIdef`/`MIDIFunc` must be filtered by `srcID`** — never assume note/CC numbers are globally unique across devices.
-4. **All timing derives from one shared `TempoClock`** — songs carry tuning (standard/drop + key) instead of BPM; clock tempo is set via MIDI tempo knob or tap tempo (default 120), never from audio analysis.
-5. **No controller crash on absence.** Guard all MIDI handlers; log warnings, never throw. Hot-plug re-registers handlers.
-6. **Effects on shared buses, not per-voice** — keep SynthDefs cheap to protect 8-voice headroom.
-7. **Web UI must not hold audio buffers in memory.**
-8. **All APC Mini LED state must be saved/restored on Notes Mode entry/exit.**
-9. **CPU governor = `performance`** — handled by `lanth0n-cpugov.service`, not manual.
-
-See [prompt.md § Non-negotiable technical constraints](prompt.md) for full rationale.
-
----
-
-## Testing
+## Dev commands
 
 ```bash
-# Run all automated tests (uses sclang + Python)
-./tests/run_tests.sh
-
-# Individual SC tests
-sclang tests/test_synths.scd
-sclang tests/test_apc_pads.scd
-sclang tests/test_midi.scd
-sclang tests/test_backtrack.scd
-
-# OLED daemon (mocked I2C)
-LANTH0N_OLED_MOCK=1 python3 tests/test_oled.py
+.venv/bin/python3 -m engine.main --offline --setlist <name>   # hardware-free run
+LANTH0N_OFFLINE_RATE=1 ...                                    # realtime-throttled
+PYTHON=.venv/bin/python3 ./tests/run_tests.sh                 # full offline suite
+cd web && npm run build                                       # web build
+LANTH0N_DEVICES_JSON='...' ...                                # mock device snapshot
 ```
 
-Test on the **host machine first** — only Steps 13 (boot packaging) and 14 (integration rehearsal) require physical Pi hardware. See [prompt.md § Testing strategy](prompt.md).
+- `LANTH0N_PROJECT_DIR` redirects all runtime dirs (tests use temp dirs;
+  set it BEFORE importing `engine.paths`).
+- Tests must be import-order safe: env before `engine` imports.
+- `web/build/` is git-ignored; rebuild before running the web server or
+  `test_routing_web.py` against a fresh clone.
 
----
+## Deployment
 
-## Deploy to Pi
-
-```bash
-# Copy a file and hot-reload SC
-scp src/<file>.scd lanthon@lanth0n.local:/tmp/
-ssh lanthon@lanth0n.local "sudo systemctl stop lanthon-synth.service && sudo pkill -9 jackd; sleep 2; sudo cp /tmp/<file>.scd /home/lanthon/lanthon-synth/src/ && sudo chown lanthon:lanthon /home/lanthon/lanthon-synth/src/<file>.scd && sudo systemctl start lanthon-synth.service"
-
-# Check health after 35s
-ssh lanthon@lanth0n.local "sudo systemctl status lanthon-synth.service --no-pager | grep Active: && sudo grep -a 'RIG READY' /var/log/lanth0n/synth.log | tail -1"
-
-# Full setup on fresh Pi OS
-sudo ./deploy/setup.sh && sudo reboot
-```
-
-Full deployment instructions: [DEPLOY.md](DEPLOY.md).  
-Controller note/CC/srcID map: [CONTROLS.md](CONTROLS.md).  
-Test log: [TEST_LOG.md](TEST_LOG.md).
-
----
-
-## Web UI (SvelteKit)
-
-- Source: `web/src/` — routes map to config pages (files, setlists, midi, routing, pads, programs, worlde, worlde).
-- OSC bridge: `web/src/lib/osc.js` — sends commands to SC on port 57120.
-- CSRF disabled (`svelte.config.js`) — safe for local-device-only use.
-- Upload body limit: set via `Environment="BODY_SIZE_LIMIT=104857600"` in `lanthon-web.service` (not `kit.bodySizeLimit`).
-- `config.js` uses `process.cwd()` for `PROJECT_ROOT` (not `import.meta.dirname` — build depth shifts).
-- Build: `cd web && npm run build`. Runs from `web/build/`.
+`deploy/setup.sh` installs packages (portaudio, python, node, pip deps:
+sounddevice/soundfile/python-rtmidi/python-osc/luma.oled/Pillow), builds
+the web UI, installs the four systemd units. See [DEPLOY.md](DEPLOY.md).
+The Pi hostname is `L4NTH0N-5YNTH` (ssh alias `lanth0n` on the dev Mac).

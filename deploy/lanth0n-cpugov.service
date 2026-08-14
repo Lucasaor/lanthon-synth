@@ -1,9 +1,9 @@
 # =============================================================================
 # lanth0n-cpugov.service — Set CPU governor to performance on boot
 # =============================================================================
-# Sets all CPU cores to the 'performance' governor before the synth engine
-# starts. This is REQUIRED for low-latency audio — the default 'ondemand'
-# governor causes xruns when the CPU momentarily downclocks.
+# Sets all CPU cores to the 'performance' governor before the playback
+# engine starts. This is REQUIRED for low-latency audio — the default
+# 'ondemand' governor causes xruns when the CPU momentarily downclocks.
 #
 # Uses a Type=oneshot service that exits after setting, via Before= ordering
 # in lanthon-engine.service. Installed by deploy/setup.sh.

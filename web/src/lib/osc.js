@@ -1,8 +1,7 @@
 /**
  * lib/osc.js — OSC client that sends commands to the playback engine
- * (Python process listening on ENGINE_PORT, default 57120 — the port
- * SuperCollider previously used). Uses the node-osc package. Runs
- * server-side only.
+ * (Python process listening on ENGINE_PORT, default 57120). Uses the
+ * node-osc package. Runs server-side only.
  *
  * The engine registers OSC handlers for /backtrack/*, /midi/* and
  * /config/* paths (engine/osc.py).
