@@ -49,11 +49,11 @@ apt-get update -qq
 
 # ── 1a. Core packages — must all be present in Pi OS Bookworm ───────────────
 # libportaudio2: PortAudio runtime required by python-sounddevice.
-# build-essential + python3-dev: needed to build python-rtmidi from source
-# (no aarch64 wheel for newer Python versions on piwheels).
+# build-essential + python3-dev + libasound2-dev: needed to build
+# python-rtmidi from source (no aarch64 wheel for newer Python versions).
 apt-get install -y \
   libportaudio2 \
-  build-essential python3-dev \
+  build-essential python3-dev libasound2-dev \
   python3 python3-pip python3-smbus \
   i2c-tools \
   nodejs npm \
