@@ -57,6 +57,7 @@ apt-get install -y \
   python3 python3-pip python3-smbus \
   i2c-tools \
   nodejs npm \
+  ffmpeg \
   git usbutils alsa-utils \
   avahi-daemon libnss-mdns \
   bluetooth bluez
