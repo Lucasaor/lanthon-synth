@@ -170,11 +170,11 @@ echo "  Start now: systemctl start lanth0n-cpugov lanthon-engine lanthon-oled la
 # ── Step 9: mDNS hostname ────────────────────────────────────────────────────
 echo ""
 echo "=== [9/9] Configuring mDNS ==="
-HOSTNAME="lanth0n"
+HOSTNAME="${LANTH0N_HOSTNAME:-L4NTH0N-5YNTH}"
 hostnamectl set-hostname "$HOSTNAME" 2>/dev/null || echo "$HOSTNAME" > /etc/hostname
 systemctl enable avahi-daemon --now 2>/dev/null || true
 echo "  Hostname set to $HOSTNAME"
-echo "  Access the web interface at: http://lanth0n.local:5000"
+echo "  Access the web interface at: http://${HOSTNAME}.local:5000"
 
 # ── Complete ─────────────────────────────────────────────────────────────────
 echo ""
