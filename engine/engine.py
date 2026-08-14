@@ -348,7 +348,10 @@ class Engine:
         t = self.transport
         song = t.song
         return {
-            "activeSetlist": self.setlist_name or None,
+            # display name = the setlist JSON's "name" field (same as the
+            # old rig showed on the OLED/dashboard); filename key stays
+            # internal for load/persist
+            "activeSetlist": (self.setlist or {}).get("name") or self.setlist_name,
             "songName": song.name if song else None,
             "artist": song.artist if song else None,
             "tuning": song.tuning_label() if song else None,

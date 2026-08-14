@@ -41,8 +41,10 @@ class OscControl:
         try:
             if self._oled is None:
                 self._oled = SimpleUDPClient(*self._oled_addr)
+            # python-osc send_message(address, value): multiple args go
+            # inside a single list value
             self._oled.send_message(
-                "/oled/update", setlist, artist, song, state, tuning)
+                "/oled/update", [setlist, artist, song, state, tuning])
         except Exception:
             log.debug("OLED update failed (daemon not running?)")
 
@@ -51,7 +53,8 @@ class OscControl:
             if self._oled is None:
                 self._oled = SimpleUDPClient(*self._oled_addr)
             self._oled.send_message(
-                "/oled/heartbeat", 1 if online else 0, 1 if playing else 0)
+                "/oled/heartbeat",
+                [1 if online else 0, 1 if playing else 0])
         except Exception:
             log.debug("OLED heartbeat failed")
 

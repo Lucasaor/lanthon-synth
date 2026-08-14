@@ -2,8 +2,9 @@
 """
 oled_daemon.py — LANTH0N 5YNTH: SSD1306 OLED display daemon
 
-Listens for OSC messages from the SuperCollider backtrack engine and renders
-the current playback state to a 0.96" SSD1306 I2C OLED display (128×64 px).
+Listens for OSC messages from the playback engine (engine/osc.py) and
+renders the current playback state to a 0.96" SSD1306 I2C OLED display
+(128×64 px). Runs standalone — the web UI does not need to be open.
 
 Display layout (128×64, blue region top row, yellow region bottom rows):
   Line 1 (top, blue):   Setlist name
@@ -64,18 +65,18 @@ class DisplayState:
     setlist_name: str = "—"
     artist: str = "—"
     song_name: str = "—"
-    playback_state: str = "STOP"   # "PLAYING" or "STOP"
+    playback_state: str = "STOP"   # "PLAYING", "STOP" or "CUED"
     tuning: str = "—"              # e.g. "Drop D", "Standard E"
-    sc_online: bool = False        # True when SC heartbeat is recent
-    sc_playing: bool = False       # True when SC reports playback active
+    sc_online: bool = False        # True when engine heartbeat is recent
+    sc_playing: bool = False       # True when engine reports playback active
     dirty: bool = True             # True = needs re-render
 
 _state = DisplayState()
 _state_lock = threading.Lock()
 
-# Track last SC heartbeat timestamp
+# Track last engine heartbeat timestamp
 _last_heartbeat = 0.0
-HEARTBEAT_TIMEOUT = 45.0   # seconds before SC is considered offline
+HEARTBEAT_TIMEOUT = 45.0   # seconds before the engine is considered offline
 
 def update_state(setlist_name: str, artist: str, song_name: str,
                  playback_state: str, tuning: str) -> None:
@@ -90,7 +91,7 @@ def update_state(setlist_name: str, artist: str, song_name: str,
     log.info("State: %s | %s — %s | Tuning: %s", playback_state, artist, song_name, tuning)
 
 def handle_heartbeat(online: int, playing: int) -> None:
-    """Receive periodic heartbeat from SC to confirm it's alive."""
+    """Receive periodic heartbeat from the playback engine to confirm it's alive."""
     global _state, _last_heartbeat
     import time
     with _state_lock:
@@ -100,7 +101,7 @@ def handle_heartbeat(online: int, playing: int) -> None:
         _last_heartbeat = time.monotonic()
         if _state.sc_online != was_online:
             _state.dirty = True
-            log.info("SC heartbeat: %s", "ONLINE" if _state.sc_online else "OFFLINE")
+            log.info("Engine heartbeat: %s", "ONLINE" if _state.sc_online else "OFFLINE")
 
 # =============================================================================
 # OSC SERVER
@@ -202,12 +203,12 @@ def render(device, state: DisplayState) -> None:
         font_sm = ImageFont.load_default()
         font_lg = font_sm
 
-    # Line 1: setlist name + SC status indicator (top-right)
+    # Line 1: setlist name + engine status indicator (top-right)
     status_dot = "●" if state.sc_online else "○"
     setlist_display = state.setlist_name[:15]
     draw.text((0, 0),  setlist_display, font=font_sm, fill=255)
-    # SC status indicator in top-right corner
-    draw.text((DISPLAY_W - 18, 0), f"SC{status_dot}", font=font_sm,
+    # engine status indicator in top-right corner
+    draw.text((DISPLAY_W - 18, 0), f"E{status_dot}", font=font_sm,
               fill=255 if state.sc_online else 128)
     # Line 2: artist
     draw.text((0, 14), state.artist[:18],        font=font_sm, fill=255)
@@ -232,7 +233,7 @@ def render(device, state: DisplayState) -> None:
 def render_loop(device) -> None:
     """
     Main render loop: re-render whenever state is dirty.
-    Also monitors heartbeat timeout to detect SC going offline.
+    Also monitors heartbeat timeout to detect the engine going offline.
     Runs in the main thread after OSC server is started.
     """
     import time
@@ -247,7 +248,7 @@ def render_loop(device) -> None:
             if _state.sc_online and (now - _last_heartbeat) > HEARTBEAT_TIMEOUT:
                 _state.sc_online = False
                 _state.dirty = True
-                log.warning("SC heartbeat lost — marking offline")
+                log.warning("Engine heartbeat lost — marking offline")
 
             if _state.dirty:
                 local_state = DisplayState(
