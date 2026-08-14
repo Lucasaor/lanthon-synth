@@ -49,8 +49,11 @@ apt-get update -qq
 
 # ── 1a. Core packages — must all be present in Pi OS Bookworm ───────────────
 # libportaudio2: PortAudio runtime required by python-sounddevice.
+# build-essential + python3-dev: needed to build python-rtmidi from source
+# (no aarch64 wheel for newer Python versions on piwheels).
 apt-get install -y \
   libportaudio2 \
+  build-essential python3-dev \
   python3 python3-pip python3-smbus \
   i2c-tools \
   nodejs npm \
@@ -125,11 +128,11 @@ echo ""
 echo "=== [5/9] Installing Python packages ==="
 # sounddevice → PortAudio playback + device enumeration
 # soundfile   → streaming WAV decode (flat memory)
-# python-rtmidi → MIDI transport input + automation output
+# python-rtmidi → MIDI transport input + automation output (may compile
+#                 from source — needs build-essential + python3-dev)
 # luma.oled / python-osc / Pillow → OLED daemon
 pip3 install --break-system-packages \
-  sounddevice soundfile python-rtmidi luma.oled python-osc Pillow 2>/dev/null || \
-pip3 install sounddevice soundfile python-rtmidi luma.oled python-osc Pillow
+  sounddevice soundfile python-rtmidi luma.oled python-osc Pillow
 echo "  Python packages installed."
 
 # ── Step 6: Build SvelteKit web interface ────────────────────────────────────
