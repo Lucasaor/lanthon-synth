@@ -6,6 +6,9 @@
 /var/log/lanthon-synth/
 *.log
 
+# In-flight chunked uploads (spooled to disk)
+media/.uploading/
+
 # OS files
 .DS_Store
 Thumbs.db

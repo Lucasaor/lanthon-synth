@@ -7,10 +7,33 @@
   let uploadProgress = 0;
   let messages = [];
 
-  /**
-   * Upload files with progress tracking via XMLHttpRequest.
-   * Supports multiple files at once.
-   */
+  // Large files are uploaded in 8 MB chunks (POST /api/upload/chunk) so the
+  // Pi never buffers a whole ~200 MB render in RAM (that OOM-killed node).
+  const CHUNK_BYTES = 8 * 1024 * 1024;
+
+  /** Upload one file in chunks; calls onProgress(0..100). */
+  async function uploadOne(file, onProgress) {
+    const total = Math.max(1, Math.ceil(file.size / CHUNK_BYTES));
+    for (let i = 0; i < total; i++) {
+      const blob = file.slice(i * CHUNK_BYTES, Math.min(file.size, (i + 1) * CHUNK_BYTES));
+      const r = await fetch('/api/upload/chunk', {
+        method: 'POST',
+        headers: {
+          'x-file-name': encodeURIComponent(file.name),
+          'x-chunk-index': String(i),
+          'x-chunk-total': String(total),
+        },
+        body: blob,
+      });
+      if (!r.ok) {
+        let err = `chunk ${i + 1}/${total} failed (${r.status})`;
+        try { err = (await r.json()).error ?? err; } catch {}
+        throw new Error(err);
+      }
+      onProgress(Math.round(((i + 1) / total) * 100));
+    }
+  }
+
   async function upload() {
     const input = document.getElementById('mediaInput');
     if (!input?.files?.length) return;
@@ -19,50 +42,26 @@
     uploadProgress = 0;
     messages = [];
 
-    const fd = new FormData();
-    fd.append('type', 'media');
-    for (const file of input.files) {
-      fd.append('file', file);
+    const files = [...input.files];
+    let completed = 0;
+    for (const file of files) {
+      try {
+        await uploadOne(file, (p) => {
+          uploadProgress = Math.round(completed + p / files.length);
+        });
+        messages = [...messages, `✓ ${file.name}`];
+      } catch (err) {
+        // discard any partial spool file from the failed upload
+        fetch('/api/upload/cancel', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: file.name }),
+        }).catch(() => {});
+        messages = [...messages, `✗ ${file.name}: ${err.message ?? err}`];
+      }
+      completed += 100 / files.length;
+      uploadProgress = Math.round(completed);
     }
-
-    await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/upload');
-
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          uploadProgress = Math.round((e.loaded / e.total) * 100);
-        }
-      });
-
-      xhr.addEventListener('load', () => {
-        try {
-          const json = JSON.parse(xhr.responseText);
-          if (json.results) {
-            messages = json.results.map((r) =>
-              r.ok ? `✓ ${r.name}` : `✗ ${r.name}: ${r.error}`
-            );
-          } else if (json.error) {
-            messages = [`✗ ${json.error}`];
-          }
-        } catch {
-          messages = [`✗ Upload failed (status ${xhr.status})`];
-        }
-        resolve();
-      });
-
-      xhr.addEventListener('error', () => {
-        messages = ['✗ Network error — upload failed'];
-        resolve();
-      });
-
-      xhr.addEventListener('abort', () => {
-        messages = ['⚠ Upload cancelled'];
-        resolve();
-      });
-
-      xhr.send(fd);
-    });
 
     uploading = false;
     input.value = '';  // reset so same file can be re-uploaded

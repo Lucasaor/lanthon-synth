@@ -70,11 +70,12 @@ export async function deleteSetlist(name) {
   } catch {}
 }
 
-/** List uploaded media files. */
+/** List uploaded media files (hidden spool files/dirs excluded). */
 export async function listMedia() {
   try {
     await fs.mkdir(MEDIA_DIR, { recursive: true });
-    return await fs.readdir(MEDIA_DIR);
+    const files = await fs.readdir(MEDIA_DIR);
+    return files.filter((f) => !f.startsWith('.'));
   } catch {
     return [];
   }

@@ -290,6 +290,60 @@ class TestRoutingWeb(unittest.TestCase):
         status, _ = http_call("DELETE", self.web_port, "/api/media/small-upload-test.wav")
         self.assertEqual(status, 200)
 
+    def test_chunked_upload(self):
+        """Chunked upload (raw binary chunks) reassembles the file on disk.
+
+        Content-Type must be set — SvelteKit's node adapter exposes an empty
+        body when it is absent (the browser always sends one for Blob bodies)."""
+        content = b"0123456789abcdef" * 128   # 2 KB
+        n = 3
+        for i in range(n):
+            start = i * (len(content) // n)
+            end = len(content) if i == n - 1 else (i + 1) * (len(content) // n)
+            piece = content[start:end]
+            conn = http.client.HTTPConnection("127.0.0.1", self.web_port, timeout=30)
+            conn.request("POST", "/api/upload/chunk", piece, {
+                "x-file-name": "chunky-test.wav",
+                "x-chunk-index": str(i),
+                "x-chunk-total": str(n),
+                "Content-Type": "application/octet-stream",
+            })
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode())
+            conn.close()
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(data["done"], i == n - 1)
+
+        final_path = os.path.join(str(paths.MEDIA_DIR), "chunky-test.wav")
+        with open(final_path, "rb") as f:
+            self.assertEqual(f.read(), content)
+        # spool cleaned up, spool dir hidden from listings
+        self.assertFalse(os.path.exists(os.path.join(
+            str(paths.MEDIA_DIR), ".uploading", "chunky-test.wav.part")))
+
+        status, _ = http_call("DELETE", self.web_port, "/api/media/chunky-test.wav")
+        self.assertEqual(status, 200)
+
+    def test_chunked_upload_cancel(self):
+        """A cancelled partial upload leaves no spool file behind."""
+        conn = http.client.HTTPConnection("127.0.0.1", self.web_port, timeout=30)
+        conn.request("POST", "/api/upload/chunk", b"partial", {
+            "x-file-name": "cancel-test.wav",
+            "x-chunk-index": "0",
+            "x-chunk-total": "2",
+            "Content-Type": "application/octet-stream",
+        })
+        resp = conn.getresponse()
+        conn.close()
+        self.assertEqual(resp.status, 200)
+
+        part = os.path.join(str(paths.MEDIA_DIR), ".uploading", "cancel-test.wav.part")
+        self.assertTrue(os.path.exists(part))
+        status, _ = http_call("POST", self.web_port, "/api/upload/cancel",
+                              {"name": "cancel-test.wav"})
+        self.assertEqual(status, 200)
+        self.assertFalse(os.path.exists(part))
+
     def test_engine_restart_endpoint(self):
         """POST /api/engine/restart reaches the engine over OSC when online."""
         before = len(EXIT_CALLS)
