@@ -195,6 +195,45 @@ class TestRoutingWeb(unittest.TestCase):
             time.sleep(0.05)
         raise AssertionError("song never cued")
 
+    def test_media_delete_endpoint(self):
+        """DELETE /api/media/<name>: blocked while a setlist references it,
+        allowed otherwise; never touches files outside media/."""
+        media = str(paths.MEDIA_DIR)
+        extra = os.path.join(media, "ToDelete.wav")
+        shutil.copy(os.path.join(media, "R.wav"), extra)
+        self.assertTrue(os.path.exists(extra))
+
+        # setlist that references the file
+        tmp_setlist = os.path.join(str(paths.SETLISTS_DIR), "tmpdel.json")
+        with open(tmp_setlist, "w") as f:
+            json.dump({"name": "tmpdel", "songs": [
+                {"name": "X", "wav": "ToDelete.wav", "mid": ""}]}, f)
+
+        # 1) referenced → 409
+        status, data = http_call("DELETE", self.web_port, "/api/media/ToDelete.wav")
+        self.assertEqual(status, 409)
+        self.assertIn("tmpdel", data.get("referencing", []))
+        self.assertTrue(os.path.exists(extra), "file must survive the 409")
+
+        # 2) unreferenced → deleted
+        with open(tmp_setlist, "w") as f:
+            json.dump({"name": "tmpdel", "songs": []}, f)
+        status, data = http_call("DELETE", self.web_port, "/api/media/ToDelete.wav")
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("ok"))
+        self.assertFalse(os.path.exists(extra), "file should be gone")
+
+        # 3) gone → 404
+        status, _ = http_call("DELETE", self.web_port, "/api/media/ToDelete.wav")
+        self.assertEqual(status, 404)
+
+        # 4) traversal attempts are rejected
+        status, _ = http_call("DELETE", self.web_port,
+                              "/api/media/..%2F..%2Fetc%2Fpasswd")
+        self.assertIn(status, (400, 404))
+
+        os.unlink(tmp_setlist)
+
     def test_engine_restart_endpoint(self):
         """POST /api/engine/restart reaches the engine over OSC when online."""
         before = len(EXIT_CALLS)

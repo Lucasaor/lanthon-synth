@@ -70,6 +70,22 @@
     // Refresh the file lists — await to ensure load() completes
     await invalidateAll();
   }
+
+  /** Delete an uploaded media file (refused if a setlist still uses it). */
+  async function removeFile(name) {
+    if (!confirm(`Delete "${name}"?`)) return;
+    const r = await fetch(`/api/media/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    if (r.ok) {
+      messages = [`✓ Deleted ${name}`];
+      await invalidateAll();
+    } else {
+      let err = 'Delete failed';
+      try {
+        err = (await r.json()).error ?? err;
+      } catch {}
+      messages = [`✗ ${name}: ${err}`];
+    }
+  }
 </script>
 
 <h1>File Upload</h1>
@@ -99,7 +115,12 @@
 
 <div class="card">
   <h2>Uploaded Media</h2>
-  {#each data.media as f}<div>📄 {f}</div>{/each}
+  {#each data.media as f}
+    <div class="row" style="justify-content:space-between; border-bottom:1px solid #333; padding:4px 0">
+      <span>📄 {f}</span>
+      <button class="danger" style="padding:2px 10px" on:click={() => removeFile(f)}>✕ Delete</button>
+    </div>
+  {/each}
   {#if !data.media.length}<p style="color:#666">No media files uploaded yet.</p>{/if}
 </div>
 
