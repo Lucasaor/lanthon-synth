@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -94,6 +95,7 @@ def enumerate_audio() -> List[AudioDevice]:
 
 _probe_out = None
 _probe_in = None
+_midi_backoff_until = 0.0   # monotonic timestamp: skip attempts until then
 
 
 def enumerate_midi() -> tuple:
@@ -101,9 +103,14 @@ def enumerate_midi() -> tuple:
 
     Probe rtmidi objects are created ONCE and cached — creating a fresh
     rtmidi object per call leaks an ALSA sequencer client on Linux and
-    eventually exhausts the kernel seq client table.
+    eventually exhausts the kernel seq client table. While the sequencer
+    is broken (e.g. after a USB disconnect storm), attempts are backed
+    off so the kernel is not hammered with failing opens.
     """
-    global _probe_out, _probe_in
+    global _probe_out, _probe_in, _midi_backoff_until
+    now = time.monotonic()
+    if now < _midi_backoff_until:
+        return [], []
     try:
         import rtmidi
     except Exception as exc:
@@ -118,6 +125,7 @@ def enumerate_midi() -> tuple:
                 for i, n in enumerate(_probe_out.get_ports())]
         ins = [MidiDevice(key=f"midi_in:{i}", name=n, index=i)
                for i, n in enumerate(_probe_in.get_ports())]
+        _midi_backoff_until = 0.0
         return outs, ins
     except Exception as exc:
         # broken ALSA seq state (e.g. after a USB disconnect) — recreate
@@ -125,6 +133,7 @@ def enumerate_midi() -> tuple:
         log.debug("MIDI enumeration failed: %s", exc)
         _probe_out = None
         _probe_in = None
+        _midi_backoff_until = now + 15.0
         return [], []
 
 

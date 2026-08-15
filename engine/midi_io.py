@@ -363,6 +363,7 @@ class MidiInputManager(threading.Thread):
         self._alive = True
         self._ports: Dict[str, object] = {}
         self._probe = None      # persistent enumeration probe
+        self._backoff_until = 0.0  # skip attempts while sequencer is broken
         self._lock = threading.Lock()
 
     @staticmethod
@@ -380,14 +381,18 @@ class MidiInputManager(threading.Thread):
         except Exception as exc:
             log.warning("python-rtmidi unavailable (%s) — no MIDI input", exc)
             return
+        if time.monotonic() < self._backoff_until:
+            return  # sequencer broken — don't hammer it, retry later
         try:
             if self._probe is None:
                 self._probe = rtmidi.MidiIn()
             wanted = self._probe.get_ports()
+            self._backoff_until = 0.0
         except Exception as exc:
             # broken ALSA seq state (e.g. after a USB disconnect storm) —
             # drop the probe so it is recreated on the next refresh
             self._probe = None
+            self._backoff_until = time.monotonic() + 15.0
             log.warning("MIDI port enumeration failed (%s) — will retry", exc)
             return
         with self._lock:
