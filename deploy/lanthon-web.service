@@ -18,7 +18,8 @@ Environment=PORT=5000
 Environment=HOST=0.0.0.0
 Environment=ENGINE_HOST=127.0.0.1
 Environment=ENGINE_PORT=57120
-Environment=BODY_SIZE_LIMIT=104857600
+Environment=BODY_SIZE_LIMIT=1073741824
+Environment=LANTH0N_MAX_UPLOAD_MB=1024
 
 Restart=on-failure
 RestartSec=10

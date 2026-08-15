@@ -77,6 +77,24 @@
     });
   }
 
+  /** Rename a setlist (PATCH /api/setlists/[name] { newName }). */
+  async function renameSetlist(name) {
+    const newName = prompt(`Rename setlist "${name}" to:`, name);
+    if (!newName || newName.trim() === name) return;
+    const r = await fetch(`/api/setlists/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ newName: newName.trim() }),
+    });
+    if (r.ok) {
+      setlists = setlists.map((s) => (s === name ? newName.trim() : s));
+      if (editing?._name === name) editing = null;
+    } else {
+      const d = await r.json().catch(() => ({}));
+      alert(d.error ?? 'Rename failed');
+    }
+  }
+
   /** Filter media files matching a song name for smarter defaults. */
   function matchingFiles(songName, suffix) {
     if (!songName) return mediaFiles;
@@ -129,6 +147,7 @@
     <div class="row">
       <span style="flex:1">{s}</span>
       <button on:click={() => load(s)}>Edit</button>
+      <button on:click={() => renameSetlist(s)}>Rename</button>
       <button class="primary" on:click={() => activateSetlist(s)}>Load to Rig</button>
       <button class="danger" on:click={() => del(s)}>Delete</button>
     </div>

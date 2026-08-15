@@ -13,7 +13,7 @@ import { writeFile, mkdir, statfs } from 'fs/promises';
 import path from 'path';
 import { MEDIA_DIR } from '$lib/config.js';
 
-const MAX_FILE_SIZE = 100 * 1024 * 1024;        // 100 MB
+const MAX_FILE_SIZE = (parseInt(process.env.LANTH0N_MAX_UPLOAD_MB ?? '1024', 10)) * 1024 * 1024;  // default 1 GB
 const MIN_DISK_MB  = 500;                        // require 500 MB free
 const ALLOWED_EXT = new Set(['.wav', '.flac', '.aiff', '.aif', '.mid', '.midi']);
 

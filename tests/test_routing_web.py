@@ -153,6 +153,8 @@ class TestRoutingWeb(unittest.TestCase):
             "PORT": str(cls.web_port),
             "ENGINE_HOST": "127.0.0.1",
             "ENGINE_PORT": str(cls.osc_port),
+            "BODY_SIZE_LIMIT": "1073741824",     # match production
+            "LANTH0N_MAX_UPLOAD_MB": "1024",
         })
         cls.node = subprocess.Popen(
             ["node", "build/index.js"], cwd=web_dir, env=env,
@@ -233,6 +235,60 @@ class TestRoutingWeb(unittest.TestCase):
         self.assertIn(status, (400, 404))
 
         os.unlink(tmp_setlist)
+
+    def test_setlist_rename_endpoint(self):
+        """PATCH /api/setlists/[name] renames the file + display name."""
+        status, _ = http_call("POST", self.web_port, "/api/setlists",
+                              {"name": "renameme"})
+        self.assertEqual(status, 200)
+        # rename
+        status, data = http_call("PATCH", self.web_port, "/api/setlists/renameme",
+                                 {"newName": "renamed1"})
+        self.assertEqual(status, 200)
+        self.assertEqual(data.get("name"), "renamed1")
+        _, names = http_call("GET", self.web_port, "/api/setlists")
+        self.assertIn("renamed1", names)
+        self.assertNotIn("renameme", names)
+        # renamed file's internal name matches
+        status, data = http_call("GET", self.web_port, "/api/setlists/renamed1")
+        self.assertEqual(status, 200)
+        self.assertEqual(data.get("name"), "renamed1")
+        # target collision → 409
+        status, data = http_call("PATCH", self.web_port, "/api/setlists/renamed1",
+                                 {"newName": "r"})
+        self.assertEqual(status, 409)
+        # unsafe name → 400
+        status, _ = http_call("PATCH", self.web_port, "/api/setlists/renamed1",
+                              {"newName": "../evil"})
+        self.assertEqual(status, 400)
+        status, _ = http_call("DELETE", self.web_port, "/api/setlists/renamed1")
+        self.assertEqual(status, 200)
+
+    def test_upload_small_file(self):
+        """Multipart upload lands in media/ and is listed by the API."""
+        boundary = "----lanth0nTestBoundary"
+        payload = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="small-upload-test.wav"\r\n'
+            f"Content-Type: audio/x-wav\r\n\r\n"
+        ).encode() + b"\x00\x01\x02" + (
+            f"\r\n--{boundary}--\r\n"
+        ).encode()
+
+        conn = http.client.HTTPConnection("127.0.0.1", self.web_port, timeout=30)
+        conn.request("POST", "/api/upload", payload, {
+            "content-type": f"multipart/form-data; boundary={boundary}",
+        })
+        resp = conn.getresponse()
+        body = json.loads(resp.read().decode())
+        conn.close()
+        self.assertEqual(resp.status, 200)
+        self.assertTrue(body["results"][0]["ok"])
+        media_path = os.path.join(str(paths.MEDIA_DIR), "small-upload-test.wav")
+        self.assertTrue(os.path.exists(media_path))
+        # clean up via the media delete endpoint
+        status, _ = http_call("DELETE", self.web_port, "/api/media/small-upload-test.wav")
+        self.assertEqual(status, 200)
 
     def test_engine_restart_endpoint(self):
         """POST /api/engine/restart reaches the engine over OSC when online."""
