@@ -129,9 +129,9 @@ class TestSyncAccuracy(Fixtures):
             self.assertEqual(frame, exp_f, "MIDI event frame mismatch")
             self.assertEqual(msg, exp_m)
 
-        # song finished: transport stopped at end
+        # song finished: transport stopped and rewound to the top
         self.assertFalse(engine.transport.playing)
-        self.assertEqual(engine.transport.position_frame, self.nframes)
+        self.assertEqual(engine.transport.position_frame, 0)
         engine.shutdown()
 
     def test_audio_channels_routed_correctly(self):
@@ -160,15 +160,16 @@ class TestSyncAccuracy(Fixtures):
         self.assertEqual(t.state, "cued")
         engine.play()
         self.assertTrue(t.playing)
+        for _ in range(5):
+            engine.tick(BLOCK, _Ti(0.0), None)
+        self.assertGreater(t.position_frame, 0)
         engine.stop()
         self.assertFalse(t.playing)
-        # position retained after stop, restart continues from it
-        pos = t.position_frame
+        # full stop (not pause): position rewound to the top
+        self.assertEqual(t.position_frame, 0)
         engine.play()
-        for _ in range(3):
-            engine.tick(BLOCK, _Ti(0.0), None)
-        engine.stop()
-        self.assertGreater(t.position_frame, pos)
+        self.assertTrue(t.playing)
+        self.assertEqual(t.position_frame, 0)
         engine.shutdown()
 
 

@@ -5,9 +5,12 @@ MIDI dispatch both derive their frame position from it, so audio channels
 and automation can never drift apart.
 
 States:
-    stopped — no song cued (or playback halted), position retained
+    stopped — no song cued (or playback halted), position rewound to 0
     cued    — song loaded and ready, position 0
     playing — rendering
+
+stop() is a FULL STOP, not a pause: it halts playback and rewinds to the
+start of the song, so the next play() starts from the top.
 
 The audio backend advances position_frame block by block; everything else
 (web UI state, OLED, MIDI) reads it back.
@@ -88,9 +91,12 @@ class Transport:
         self._notify()
 
     def stop(self) -> None:
+        """Full stop (not pause): halt playback and rewind to frame 0 so
+        the next play() starts from the top of the song."""
         with self._lock:
             if self.state == PLAYING:
                 self.state = STOPPED
+            self.position_frame = 0
         self._notify()
 
     @property

@@ -18,11 +18,13 @@ buttons call the exact same actions** — there is one control path.
 
 Behaviour:
 
-- **Play** — starts/continues the current song from its current position.
-- **Stop** — halts; position is retained (Play resumes from there).
+- **Play** — starts the current song from the top.
+- **Stop** — halts playback and rewinds to the start of the song; the next
+  Play starts from the top (full stop, not a pause).
 - **Next / Prev** — loads the adjacent song instantly (it was pre-cued in
   the background). If playback was active, the new song **auto-plays**.
-- **Song end** — playback stops automatically at the end of a song.
+- **Song end** — playback stops automatically and rewinds to the top of the
+  song.
 - **Load setlist** — dashboard "Load to Rig" or setlists page; the rig
   remembers the last setlist across reboots.
 - **Restart engine** — stops playback and restarts the engine process

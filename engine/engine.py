@@ -338,9 +338,13 @@ class Engine:
         if not self.offline:
             self.dispatcher.update_anchor(time.monotonic(), dac_time)
 
-        t.position_frame = end
-        if end >= song.frames:
-            self._on_song_end(pos, end, dac_time)
+        # Only advance the clock if we're still playing. If stop() ran
+        # mid-block it rewound position_frame to 0 — don't clobber the
+        # rewind with this block's end position (realtime race guard).
+        if t.playing:
+            t.position_frame = end
+            if end >= song.frames:
+                self._on_song_end(pos, end, dac_time)
 
     @staticmethod
     def _dac_time(time_info) -> float:

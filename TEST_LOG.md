@@ -37,8 +37,9 @@ WAV + MIDI automation player. Evidence per build step (dev machine,
 - **Memory (RSS)**:
   - 120 s song render: 124.0 → 124.2 MB (**+0.2 MB**, flat).
   - 25 rapid song switches (play → next ×25): 124.5 → 125.2 MB (**+0.6 MB**, flat).
-- **Transport**: cued → playing → stopped; position retained across stop;
-  song auto-stops at end.
+- **Transport**: cued → playing → stopped; stop is a FULL stop — position
+  rewinds to frame 0 so the next play() starts from the top (not a pause);
+  song auto-stops and rewinds at end.
 - CLI smoke: `python3 -m engine.main --offline --setlist smoke` renders to
   completion and writes a correct `state.json`.
 
