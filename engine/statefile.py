@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -33,10 +34,18 @@ log = logging.getLogger("engine.statefile")
 
 def _atomic_write(path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.replace(tmp, path)
+    # unique temp name per writer: the transport listener and the heartbeat
+    # thread can write concurrently, and a shared .tmp name races on replace
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def write_state(state: Dict[str, Any]) -> None:

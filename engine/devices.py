@@ -159,7 +159,7 @@ def write_devices_snapshot() -> Optional[Snapshot]:
     """Persist the live snapshot to config/devices.json for the web UI."""
     snap = snapshot()
     try:
-        tmp = f"{DEVICES_FILE}.tmp"
+        tmp = f"{DEVICES_FILE}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(snapshot_to_json(snap), f, indent=2)
         os.replace(tmp, DEVICES_FILE)

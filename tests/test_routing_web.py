@@ -48,11 +48,11 @@ MOCK_B = json.dumps({
     "midi_out": [{"key": "midi_out:0", "name": "Mock B Synth", "index": 0}],
     "midi_in": [],
 })
-os.environ["LANTH0N_DEVICES_JSON"] = MOCK_A
 
 sys.path.insert(0, REPO)
 
 from engine import devices  # noqa: E402
+from engine import paths  # noqa: E402
 from engine.engine import Engine  # noqa: E402
 from engine.smf import write_smf  # noqa: E402
 
@@ -107,13 +107,15 @@ def make_song(dirp, name):
 class TestRoutingWeb(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls._prev_devices = os.environ.get("LANTH0N_DEVICES_JSON")
+        os.environ["LANTH0N_DEVICES_JSON"] = MOCK_A
         # fixture song + setlist in the engine project dir
-        media = os.path.join(TMP, "media")
+        media = str(paths.MEDIA_DIR)
         os.makedirs(media, exist_ok=True)
         wav, mid = make_song(TMP, "R")
         shutil.copy(os.path.join(TMP, wav), os.path.join(media, wav))
         shutil.copy(os.path.join(TMP, mid), os.path.join(media, mid))
-        setdir = os.path.join(TMP, "setlists")
+        setdir = str(paths.SETLISTS_DIR)
         os.makedirs(setdir, exist_ok=True)
         with open(os.path.join(setdir, "r.json"), "w") as f:
             json.dump({"name": "Routing Set", "songs": [
@@ -135,8 +137,10 @@ class TestRoutingWeb(unittest.TestCase):
         # engine publishes its live snapshot (mocked) for the web UI
         devices.write_devices_snapshot()
 
-        # production-like web dir: TMP/web/build + node_modules link
-        web_dir = os.path.join(TMP, "web")
+        # production-like web dir: <project root>/web/build + node_modules link
+        # (must live under the SAME project root the engine resolves, so the
+        # web server reads/writes the same config/ the engine uses)
+        web_dir = os.path.join(str(paths.CONFIG_DIR.parent), "web")
         shutil.copytree(BUILD, os.path.join(web_dir, "build"))
         os.symlink(os.path.join(REPO, "web", "node_modules"),
                    os.path.join(web_dir, "node_modules"))
@@ -173,6 +177,10 @@ class TestRoutingWeb(unittest.TestCase):
         except Exception:
             pass
         cls.engine.shutdown()
+        if cls._prev_devices is None:
+            os.environ.pop("LANTH0N_DEVICES_JSON", None)
+        else:
+            os.environ["LANTH0N_DEVICES_JSON"] = cls._prev_devices
 
     @classmethod
     def _wait_cued(cls, timeout=10.0):

@@ -16,7 +16,7 @@ from unittest import mock
 
 TMP = tempfile.mkdtemp(prefix="lanth0n-recovery-")
 os.environ["LANTH0N_PROJECT_DIR"] = TMP
-os.environ["LANTH0N_DEVICES_JSON"] = json.dumps({
+MOCK_DEVICES = json.dumps({
     "audio": [{"key": "audio:0", "name": "Mock USB", "index": 0, "max_out_channels": 8}],
     "midi_out": [{"key": "midi_out:0", "name": "Mock Out", "index": 0}],
     "midi_in": [{"key": "midi_in:0", "name": "Mock In", "index": 0}],
@@ -30,6 +30,20 @@ from engine import devices  # noqa: E402
 
 SR = 48000
 BLOCK = 512
+
+
+def _push_mock_env():
+    """Set the mock device snapshot, remembering any previous value."""
+    prev = os.environ.get("LANTH0N_DEVICES_JSON")
+    os.environ["LANTH0N_DEVICES_JSON"] = MOCK_DEVICES
+    return prev
+
+
+def _pop_mock_env(prev):
+    if prev is None:
+        os.environ.pop("LANTH0N_DEVICES_JSON", None)
+    else:
+        os.environ["LANTH0N_DEVICES_JSON"] = prev
 
 
 class _Ti:
@@ -56,6 +70,14 @@ class FakeBackend:
 
 
 class TestAudioRecovery(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._prev_devices = _push_mock_env()
+
+    @classmethod
+    def tearDownClass(cls):
+        _pop_mock_env(cls._prev_devices)
+
     def make_engine(self):
         return Engine(
             offline=False, sample_rate=SR, block_size=BLOCK,
@@ -162,6 +184,14 @@ class _FakeRtmidi:
 
 
 class TestProbeReuse(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._prev_devices = _push_mock_env()
+
+    @classmethod
+    def tearDownClass(cls):
+        _pop_mock_env(cls._prev_devices)
+
     def test_devices_enumerate_reuses_probe(self):
         with mock.patch.dict(sys.modules, {"rtmidi": _FakeRtmidi}):
             _FakeRtmidi.reset()

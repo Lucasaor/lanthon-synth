@@ -28,17 +28,30 @@ MOCK_SNAPSHOT = json.dumps({
         {"key": "midi_in:0", "name": "Mock Controller", "index": 0},
     ],
 })
-os.environ["LANTH0N_DEVICES_JSON"] = MOCK_SNAPSHOT
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from engine import devices  # noqa: E402
+from engine import paths  # noqa: E402
 from engine.engine import Engine  # noqa: E402
 from engine.smf import write_smf  # noqa: E402
 from engine.song import Song  # noqa: E402
 
 SR = 48000
 BLOCK = 512
+
+
+def _push_mock_env():
+    prev = os.environ.get("LANTH0N_DEVICES_JSON")
+    os.environ["LANTH0N_DEVICES_JSON"] = MOCK_SNAPSHOT
+    return prev
+
+
+def _pop_mock_env(prev):
+    if prev is None:
+        os.environ.pop("LANTH0N_DEVICES_JSON", None)
+    else:
+        os.environ["LANTH0N_DEVICES_JSON"] = prev
 
 
 def make_wav(path, seconds, nch=4):
@@ -57,6 +70,14 @@ def make_wav(path, seconds, nch=4):
 
 
 class TestEnumeration(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._prev = _push_mock_env()
+
+    @classmethod
+    def tearDownClass(cls):
+        _pop_mock_env(cls._prev)
+
     def test_mock_snapshot_reflected(self):
         snap = devices.snapshot()
         self.assertEqual(len(snap.audio), 2)
@@ -77,6 +98,7 @@ class TestEnumeration(unittest.TestCase):
 class TestResolution(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls._prev = _push_mock_env()
         cls.dir = tempfile.mkdtemp(prefix="lanth0n-resolve-")
         cls.wav = os.path.join(cls.dir, "song.wav")
         cls.mid = os.path.join(cls.dir, "song.mid")
@@ -86,6 +108,11 @@ class TestResolution(unittest.TestCase):
                         wav_path=cls.wav, mid_path=cls.mid, sample_rate=SR)
         cls.song.cue()
         cls.snap = devices.snapshot()
+
+    @classmethod
+    def tearDownClass(cls):
+        _pop_mock_env(cls._prev)
+        cls.song.close()
 
     def _plans(self, cfg):
         return devices.resolve_routing(cfg, self.song, self.snap)[0]
@@ -173,6 +200,14 @@ class TestResolution(unittest.TestCase):
 class TestOfflineMultiDevice(unittest.TestCase):
     """End-to-end offline render across two mocked devices."""
 
+    @classmethod
+    def setUpClass(cls):
+        cls._prev = _push_mock_env()
+
+    @classmethod
+    def tearDownClass(cls):
+        _pop_mock_env(cls._prev)
+
     def test_channels_land_on_configured_devices(self):
         dirp = tempfile.mkdtemp(prefix="lanth0n-multi-")
         wav = os.path.join(dirp, "s.wav")
@@ -190,7 +225,7 @@ class TestOfflineMultiDevice(unittest.TestCase):
                 "midi_automation": {"device": "Mock Pedalboard"},
             }
         }
-        cfg_dir = os.path.join(TMP, "config")
+        cfg_dir = str(paths.CONFIG_DIR)
         os.makedirs(cfg_dir, exist_ok=True)
         with open(os.path.join(cfg_dir, "audio_routing.json"), "w") as f:
             json.dump(routing, f)

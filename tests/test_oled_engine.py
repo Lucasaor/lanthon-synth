@@ -34,6 +34,7 @@ os.environ["LANTH0N_OLED_PORT"] = str(OLED_PORT)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import oled_daemon  # noqa: E402
+from engine import paths  # noqa: E402
 from engine.engine import Engine  # noqa: E402
 from engine.smf import write_smf  # noqa: E402
 
@@ -89,14 +90,16 @@ class TestOledEngine(unittest.TestCase):
         oled_daemon.start_osc_server()
 
         cls.dir = tempfile.mkdtemp(prefix="lanth0n-oled-fix-")
-        media = os.path.join(TMP, "media")
+        # write fixtures into the engine's resolved project dirs so the
+        # test works regardless of import order / LANTH0N_PROJECT_DIR
+        media = str(paths.MEDIA_DIR)
         os.makedirs(media, exist_ok=True)
         for name, tuning, key in (("Sober", "drop", "D"), ("46 and 2", "standard", "E")):
             wav, mid = make_song(cls.dir, name, tuning, key)
             import shutil
             shutil.copy(os.path.join(cls.dir, wav), os.path.join(media, wav))
             shutil.copy(os.path.join(cls.dir, mid), os.path.join(media, mid))
-        setlists_dir = os.path.join(TMP, "setlists")
+        setlists_dir = str(paths.SETLISTS_DIR)
         os.makedirs(setlists_dir, exist_ok=True)
         with open(os.path.join(setlists_dir, "oled.json"), "w") as f:
             json.dump({"name": "Night 1", "songs": [

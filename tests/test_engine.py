@@ -25,6 +25,7 @@ os.environ.setdefault("LANTH0N_PROJECT_DIR", TMP)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from engine import paths  # noqa: E402
 from engine.engine import Engine  # noqa: E402
 from engine.smf import DEFAULT_TEMPO_US, write_smf  # noqa: E402
 from engine.song import Song  # noqa: E402
@@ -64,10 +65,15 @@ def rss_mb():
 
 
 class Fixtures(unittest.TestCase):
-    """Base: builds one WAV + one MID with known event timestamps."""
+    """Base: builds one WAV + one MID with known event timestamps.
+
+    Mock device snapshots are popped for this module — the engine's
+    identity fallback (no devices) is what these tests assert.
+    """
 
     @classmethod
     def setUpClass(cls):
+        cls._prev_devices = os.environ.pop("LANTH0N_DEVICES_JSON", None)
         cls.dir = tempfile.mkdtemp(prefix="lanth0n-fix-")
         cls.wav_path = os.path.join(cls.dir, "test-song.wav")
         cls.mid_path = os.path.join(cls.dir, "test-song.mid")
@@ -82,6 +88,11 @@ class Fixtures(unittest.TestCase):
         make_midi(cls.mid_path, cls.events_spec)
         cls.expected_frames = [frames_at(t) for t, _ in cls.events_spec]
         cls.expected_msgs = [m for _, m in cls.events_spec]
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._prev_devices is not None:
+            os.environ["LANTH0N_DEVICES_JSON"] = cls._prev_devices
 
     def make_engine(self):
         return Engine(
@@ -195,14 +206,14 @@ class TestMemory(Fixtures):
                 "key": "E", "wav": os.path.basename(self.wav_path),
                 "mid": os.path.basename(self.mid_path),
             })
-        setlist_file = os.path.join(TMP, "setlists", "stress.json")
+        setlist_file = os.path.join(str(paths.SETLISTS_DIR), "stress.json")
         os.makedirs(os.path.dirname(setlist_file), exist_ok=True)
         with open(setlist_file, "w") as f:
             import json
             json.dump({"name": "stress", "songs": songs}, f)
         # copy fixture files into the engine media dir
         import shutil
-        media = os.path.join(TMP, "media")
+        media = str(paths.MEDIA_DIR)
         os.makedirs(media, exist_ok=True)
         shutil.copy(self.wav_path, media)
         shutil.copy(self.mid_path, media)

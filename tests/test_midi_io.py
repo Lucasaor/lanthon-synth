@@ -23,6 +23,7 @@ os.environ.setdefault("LANTH0N_PROJECT_DIR", TMP)
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from engine import paths  # noqa: E402
 from engine.engine import Engine  # noqa: E402
 from engine.midi_io import (  # noqa: E402
     LearnCapture,
@@ -95,7 +96,7 @@ class TestDecodeAndMap(unittest.TestCase):
         learn = LearnCapture()
         learn.start()
         self.assertTrue(learn.capture(bytes([0x90, 60, 100])))
-        with open(os.path.join(TMP, "config", "midi_learn.json")) as f:
+        with open(paths.MIDI_LEARN_FILE) as f:
             ev = json.load(f)
         self.assertEqual(ev["type"], "note")
         self.assertEqual(ev["value"], 60)
@@ -133,7 +134,7 @@ class TestVirtualPortEndToEnd(unittest.TestCase):
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="lanth0n-midie2e-")
-        media = os.path.join(TMP, "media")
+        media = str(paths.MEDIA_DIR)
         os.makedirs(media, exist_ok=True)
         wav, mid = make_fixture_song(self.dir, "A")
         import shutil
@@ -142,7 +143,7 @@ class TestVirtualPortEndToEnd(unittest.TestCase):
         wav2, mid2 = make_fixture_song(self.dir, "B")
         shutil.copy(os.path.join(self.dir, wav2), os.path.join(media, wav2))
         shutil.copy(os.path.join(self.dir, mid2), os.path.join(media, mid2))
-        setlists = os.path.join(TMP, "setlists")
+        setlists = str(paths.SETLISTS_DIR)
         os.makedirs(setlists, exist_ok=True)
         with open(os.path.join(setlists, "midie2e.json"), "w") as f:
             json.dump({"name": "midie2e", "songs": [
@@ -150,8 +151,9 @@ class TestVirtualPortEndToEnd(unittest.TestCase):
                 {"name": "B", "wav": wav2, "mid": mid2, "tuning": "drop", "key": "D"},
             ]}, f)
         # MIDI map: note36→play, cc64→stop, note38→next, note37→prev (ch 0)
-        os.makedirs(os.path.join(TMP, "config"), exist_ok=True)
-        with open(os.path.join(TMP, "config", "midi_map.json"), "w") as f:
+        cfg_dir = str(paths.CONFIG_DIR)
+        os.makedirs(cfg_dir, exist_ok=True)
+        with open(os.path.join(cfg_dir, "midi_map.json"), "w") as f:
             json.dump({"mappings": [
                 {"chan": 0, "type": "note", "value": 36, "action": "btPlay"},
                 {"chan": 0, "type": "cc", "value": 64, "action": "btStop"},
@@ -198,7 +200,7 @@ class TestVirtualPortEndToEnd(unittest.TestCase):
         time.sleep(delay)
 
     def _state_file(self):
-        with open(os.path.join(TMP, "config", "state.json")) as f:
+        with open(paths.STATE_FILE) as f:
             return json.load(f)
 
     def test_transport_actions_via_midi(self):
