@@ -103,6 +103,7 @@ class Engine:
         self._recovering = False
         self._recovery_lock = threading.Lock()
         self._last_recovery_attempt: Optional[float] = None
+        self._recovery_failures = 0
         self._streams_healthy = False
 
     # ------------------------------------------------------------------
@@ -363,7 +364,7 @@ class Engine:
             return
         self._audio_error_count += 1
         if self._audio_error_count >= 3:
-            self._start_audio_recovery()
+            self._start_audio_recovery(force=True)
 
     def _start_streams(self) -> bool:
         """Open the audio streams; tolerate missing/broken devices."""
@@ -371,19 +372,26 @@ class Engine:
             self.backend.start(self._plans, self.sr, self.block_size)
             self._streams_healthy = True
             return True
-        except Exception:
-            log.exception("could not open audio streams (no device?)")
+        except Exception as exc:
+            # expected while no output device is connected — single line,
+            # no traceback spam on every retry
+            log.warning("could not open audio streams (%s)", exc)
             self._streams_healthy = False
             return False
 
-    def _start_audio_recovery(self) -> None:
+    def _recovery_cooldown(self, force: bool) -> float:
+        if force:
+            return 5.0
+        return min(60.0, 5.0 * (2 ** min(self._recovery_failures, 4)))
+
+    def _start_audio_recovery(self, force: bool = False) -> None:
         """Re-enumerate devices and reopen the audio streams (hot-plug)."""
         if self.offline:
             return
         now = time.monotonic()
         if (self._last_recovery_attempt is not None
-                and now - self._last_recovery_attempt < 5.0):
-            return  # cooldown — don't hammer a broken kernel audio state
+                and now - self._last_recovery_attempt < self._recovery_cooldown(force)):
+            return  # back off — don't hammer a broken kernel audio state
         if not self._recovery_lock.acquire(blocking=False):
             return
         if self._recovering:
@@ -407,12 +415,15 @@ class Engine:
                                    device=None, n_out=8, routes=[], is_master=True)
                     ]
                 if self._start_streams():
+                    self._recovery_failures = 0
                     log.info("audio recovery complete: %d plan(s)", len(self._plans))
                 else:
+                    self._recovery_failures += 1
                     log.warning("audio recovery: no usable output device yet "
                                 "— will retry automatically")
             except Exception:
                 log.exception("audio recovery failed — will retry")
+                self._recovery_failures += 1
                 self._streams_healthy = False
             finally:
                 self._audio_error_count = 0
