@@ -31,7 +31,10 @@ export async function POST({ request }) {
   const idx = parseInt(request.headers.get('x-chunk-index') ?? '', 10);
   const total = parseInt(request.headers.get('x-chunk-total') ?? '', 10);
 
-  const safe = path.basename(name);
+  // Trim surrounding whitespace — filenames with leading/trailing spaces
+  // are stored verbatim but engine.load_setlist() strips them, so a file
+  // named " song.wav" could never be cued. Normalize at the upload edge.
+  const safe = path.basename(name).trim();
   if (!safe || /[\\/]/.test(safe) || safe.startsWith('.') ||
       !Number.isInteger(idx) || !Number.isInteger(total) ||
       idx < 0 || total < 1 || idx >= total || total > MAX_CHUNKS) {

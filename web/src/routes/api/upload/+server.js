@@ -32,11 +32,18 @@ async function saveOneFile(file) {
       error: `Unsupported type "${ext}" — upload WAV/FLAC/AIFF audio and MID files`,
     };
   }
+  // Normalize the file name: trim surrounding whitespace (leading/trailing
+  // spaces break engine cueing — engine.load_setlist() strips them) and
+  // ensure it stays inside media/.
+  const safeName = path.basename(file.name).trim();
+  if (!safeName || safeName.startsWith('.')) {
+    return { ok: false, name: file.name, error: 'invalid file name' };
+  }
   const buffer = Buffer.from(await file.arrayBuffer());
-  const savedPath = path.join(MEDIA_DIR, file.name);
+  const savedPath = path.join(MEDIA_DIR, safeName);
   await writeFile(savedPath, buffer);
   console.log(`[UPLOAD] Saved: ${savedPath}`);
-  return { ok: true, name: file.name, path: savedPath };
+  return { ok: true, name: safeName, path: savedPath };
 }
 
 export async function POST({ request }) {
