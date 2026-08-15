@@ -347,7 +347,12 @@ class LearnCapture:
 
 class MidiInputManager(threading.Thread):
     """Opens all available MIDI input ports; refreshes every 2 s so
-    hot-plugged controllers are picked up without a restart."""
+    hot-plugged controllers are picked up without a restart.
+
+    IMPORTANT: the probe MidiIn used for port enumeration is created ONCE
+    and reused. Creating a fresh rtmidi object per refresh leaks an ALSA
+    sequencer client on Linux and eventually exhausts the kernel seq
+    client table ("open /dev/snd/seq failed: Cannot allocate memory")."""
 
     REFRESH_SEC = 2.0
 
@@ -357,6 +362,7 @@ class MidiInputManager(threading.Thread):
         self.enabled = enabled
         self._alive = True
         self._ports: Dict[str, object] = {}
+        self._probe = None      # persistent enumeration probe
         self._lock = threading.Lock()
 
     @staticmethod
@@ -374,7 +380,16 @@ class MidiInputManager(threading.Thread):
         except Exception as exc:
             log.warning("python-rtmidi unavailable (%s) — no MIDI input", exc)
             return
-        wanted = rtmidi.MidiIn().get_ports()
+        try:
+            if self._probe is None:
+                self._probe = rtmidi.MidiIn()
+            wanted = self._probe.get_ports()
+        except Exception as exc:
+            # broken ALSA seq state (e.g. after a USB disconnect storm) —
+            # drop the probe so it is recreated on the next refresh
+            self._probe = None
+            log.warning("MIDI port enumeration failed (%s) — will retry", exc)
+            return
         with self._lock:
             for name in list(self._ports):
                 if name not in wanted:
@@ -392,32 +407,40 @@ class MidiInputManager(threading.Thread):
                 except Exception as exc:
                     log.warning("could not open MIDI input '%s': %s", name, exc)
 
+    def _loop_once(self) -> None:
+        now = time.monotonic()
+        if now >= self._next_refresh:
+            self._refresh()
+            self._next_refresh = now + self.REFRESH_SEC
+        with self._lock:
+            ports = list(self._ports.items())
+        for _name, mi in ports:
+            msg = None
+            try:
+                msg = mi.get_message()
+            except Exception:
+                msg = None
+            if msg is None:
+                continue
+            data, _delta = msg
+            if isinstance(data, (list, tuple)):
+                data = bytes(data)
+            try:
+                self.handler(bytes(data))
+            except Exception:
+                log.exception("MIDI input handler failed")
+
     def run(self) -> None:
         if not self.enabled:
             return
-        next_refresh = 0.0
+        self._next_refresh = 0.0
+        # NEVER die: a broken ALSA/rtmidi state must not take MIDI input
+        # down permanently — log, sleep, retry on the next refresh.
         while self._alive:
-            now = time.monotonic()
-            if now >= next_refresh:
-                self._refresh()
-                next_refresh = now + self.REFRESH_SEC
-            with self._lock:
-                ports = list(self._ports.items())
-            for _name, mi in ports:
-                msg = None
-                try:
-                    msg = mi.get_message()
-                except Exception:
-                    msg = None
-                if msg is None:
-                    continue
-                data, _delta = msg
-                if isinstance(data, (list, tuple)):
-                    data = bytes(data)
-                try:
-                    self.handler(bytes(data))
-                except Exception:
-                    log.exception("MIDI input handler failed")
+            try:
+                self._loop_once()
+            except Exception:
+                log.exception("MIDI input loop error (recovering)")
             time.sleep(0.005)
 
     def stop(self) -> None:
@@ -429,3 +452,9 @@ class MidiInputManager(threading.Thread):
                 except Exception:
                     pass
             self._ports.clear()
+        try:
+            if self._probe is not None:
+                self._probe.close_port()
+        except Exception:
+            pass
+        self._probe = None

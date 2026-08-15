@@ -92,17 +92,39 @@ def enumerate_audio() -> List[AudioDevice]:
         return []
 
 
+_probe_out = None
+_probe_in = None
+
+
 def enumerate_midi() -> tuple:
+    """List MIDI out/in ports.
+
+    Probe rtmidi objects are created ONCE and cached — creating a fresh
+    rtmidi object per call leaks an ALSA sequencer client on Linux and
+    eventually exhausts the kernel seq client table.
+    """
+    global _probe_out, _probe_in
     try:
         import rtmidi
-
-        outs = [MidiDevice(key=f"midi_out:{i}", name=n, index=i)
-                for i, n in enumerate(rtmidi.MidiOut().get_ports())]
-        ins = [MidiDevice(key=f"midi_in:{i}", name=n, index=i)
-               for i, n in enumerate(rtmidi.MidiIn().get_ports())]
-        return outs, ins
     except Exception as exc:
         log.debug("MIDI enumeration unavailable: %s", exc)
+        return [], []
+    try:
+        if _probe_out is None:
+            _probe_out = rtmidi.MidiOut()
+        if _probe_in is None:
+            _probe_in = rtmidi.MidiIn()
+        outs = [MidiDevice(key=f"midi_out:{i}", name=n, index=i)
+                for i, n in enumerate(_probe_out.get_ports())]
+        ins = [MidiDevice(key=f"midi_in:{i}", name=n, index=i)
+               for i, n in enumerate(_probe_in.get_ports())]
+        return outs, ins
+    except Exception as exc:
+        # broken ALSA seq state (e.g. after a USB disconnect) — recreate
+        # the probes next time instead of reusing stale handles
+        log.debug("MIDI enumeration failed: %s", exc)
+        _probe_out = None
+        _probe_in = None
         return [], []
 
 

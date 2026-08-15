@@ -49,6 +49,7 @@ class Engine:
         oled_port: int = 9000,
         midi_out_port: Optional[str] = None,
         midi_in_enabled: bool = True,
+        backend=None,   # injectable for tests
     ):
         self.sr = sample_rate
         self.block_size = block_size
@@ -77,7 +78,7 @@ class Engine:
         self.learn = LearnCapture()
         self.midi_in = MidiInputManager(self._on_midi_message, midi_in_enabled)
 
-        self.backend = make_backend(self, offline)
+        self.backend = backend if backend is not None else make_backend(self, offline)
 
         # setlist state
         self.setlist: Optional[dict] = None
@@ -95,6 +96,12 @@ class Engine:
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop, daemon=True, name="heartbeat")
+
+        # audio health (device hot-unplug detection + recovery)
+        self._last_callback = time.monotonic()
+        self._audio_error_count = 0
+        self._recovering = False
+        self._recovery_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # MIDI output
@@ -260,7 +267,18 @@ class Engine:
 
     def tick(self, frames: int, time_info, status) -> None:
         """Render one block. `time_info` is PortAudio's callback time_info
-        (or the offline stand-in); `status` is ignored."""
+        (or the offline stand-in); `status` is the callback flags int
+        (None = OK, used by the offline driver)."""
+        if status:
+            # PortAudio callback error (underrun / device lost): silence the
+            # output and let the recovery logic reopen the streams. Never
+            # spin on a dead device.
+            for plan in self._plans:
+                self.backend.put_buffer(plan.key, self._zeros(frames, plan))
+            self.audio_callback_notify(False)
+            return
+        self.audio_callback_notify(True)
+
         t = self.transport
         song = t.song
         if not t.playing or song is None or not song.open:
@@ -332,6 +350,54 @@ class Engine:
         return np.zeros((frames, n), dtype=np.float32)
 
     # ------------------------------------------------------------------
+    # Audio health / device hot-unplug recovery
+    # ------------------------------------------------------------------
+
+    def audio_callback_notify(self, ok: bool) -> None:
+        """Called from the audio callback every block."""
+        self._last_callback = time.monotonic()
+        if ok:
+            return
+        self._audio_error_count += 1
+        if self._audio_error_count >= 3:
+            self._start_audio_recovery()
+
+    def _start_audio_recovery(self) -> None:
+        """Re-enumerate devices and reopen the audio streams (hot-plug)."""
+        if self.offline:
+            return
+        if not self._recovery_lock.acquire(blocking=False):
+            return
+        if self._recovering:
+            self._recovery_lock.release()
+            return
+        self._recovering = True
+        self._recovery_lock.release()
+        log.warning("audio device error detected — recovering streams")
+
+        def do():
+            try:
+                self.backend.stop()
+                self._dev_snapshot = devices.snapshot()
+                song = self.transport.song
+                if song is not None and song.open:
+                    self._plans = self.build_plans(song)
+                else:
+                    self._plans = [
+                        DevicePlan(key="default", name="default output",
+                                   device=None, n_out=8, routes=[], is_master=True)
+                    ]
+                self.backend.start(self._plans, self.sr, self.block_size)
+                log.info("audio recovery complete: %d plan(s)", len(self._plans))
+            except Exception:
+                log.exception("audio recovery failed — will retry")
+            finally:
+                self._audio_error_count = 0
+                self._recovering = False
+
+        threading.Thread(target=do, daemon=True, name="audio-recovery").start()
+
+    # ------------------------------------------------------------------
     # MIDI input
     # ------------------------------------------------------------------
 
@@ -388,6 +454,11 @@ class Engine:
                 devices.write_devices_snapshot()
             except Exception:
                 log.exception("device snapshot refresh failed")
+            # watchdog: no audio callbacks while playing = device vanished
+            # without error statuses (e.g. the callback thread wedged)
+            if (self.transport.playing and not self.offline
+                    and time.monotonic() - self._last_callback > 3.0):
+                self._start_audio_recovery()
 
     # ------------------------------------------------------------------
     # OSC control interface

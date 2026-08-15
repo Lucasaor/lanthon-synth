@@ -105,9 +105,12 @@ class PortAudioBackend(AudioBackend):
 
             def make_cb(plan):
                 def cb(outdata, frames, time_info, status):
-                    if plan.is_master:
-                        self.engine.tick(frames, time_info, status)
+                    # NOTE: never raise from the callback (PortAudio would
+                    # call it again in a tight loop). On any error just
+                    # silence the buffer and let the engine recover.
                     try:
+                        if plan.is_master:
+                            self.engine.tick(frames, time_info, status)
                         with self._buffers_lock:
                             buf = self._buffers.get(plan.key)
                             if buf is None or buf.shape != outdata.shape:
