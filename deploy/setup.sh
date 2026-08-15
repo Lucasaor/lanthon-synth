@@ -171,6 +171,14 @@ systemctl enable lanth0n-cpugov lanthon-engine lanthon-oled lanthon-web
 echo "  Services enabled. They will auto-start on next boot."
 echo "  Start now: systemctl start lanth0n-cpugov lanthon-engine lanthon-oled lanthon-web"
 
+# Allow the web UI to restart the engine (POST /api/engine/restart fallback)
+if [ -d /etc/sudoers.d ]; then
+  sed -e "s|%USER%|$SERVICE_USER|g" \
+      "$SCRIPT_DIR/lanthon-engine-sudoers" > /etc/sudoers.d/lanthon-engine
+  chmod 440 /etc/sudoers.d/lanthon-engine
+  echo "  Sudoers entry installed (web UI can restart lanthon-engine)."
+fi
+
 # ── Step 9: mDNS hostname ────────────────────────────────────────────────────
 echo ""
 echo "=== [9/9] Configuring mDNS ==="

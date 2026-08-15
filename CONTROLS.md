@@ -14,6 +14,7 @@ buttons call the exact same actions** — there is one control path.
 | Stop | ■ | your button |
 | Next song | ⏭ | your button |
 | Previous song | ⏮ | your button |
+| Restart engine | 🔄 dashboard → Engine | your button |
 
 Behaviour:
 
@@ -24,6 +25,12 @@ Behaviour:
 - **Song end** — playback stops automatically at the end of a song.
 - **Load setlist** — dashboard "Load to Rig" or setlists page; the rig
   remembers the last setlist across reboots.
+- **Restart engine** — stops playback and restarts the engine process
+  (dashboard → Engine → 🔄, or a mapped MIDI CC). systemd brings it back
+  in ~5 s; the web UI and OLED show it offline briefly, then online.
+  If the engine is already dead, the button falls back to
+  `systemctl restart lanthon-engine` (via the sudoers rule installed by
+  the setup script).
 
 Every state change lands in `config/state.json` — the single source of
 truth read by the dashboard and displayed on the OLED.
@@ -50,6 +57,8 @@ Mapping rules:
 - `cc` — triggers on a **rising edge at value ≥ 64** (won't retrigger
   while held).
 - `pgm` — triggers on any program change.
+- Available actions: `btPlay`, `btStop`, `btNext`, `btPrev`,
+  `engineRestart` (same restart as the dashboard button).
 - The engine listens on **all connected MIDI input ports** (USB and
   Bluetooth, re-scanned every 2 s) — no device-specific setup needed.
 

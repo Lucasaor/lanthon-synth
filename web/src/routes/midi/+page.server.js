@@ -5,6 +5,7 @@ const ACTIONS = [
   { value: 'btStop',  label: '■ Stop' },
   { value: 'btNext',  label: '⏭ Next Song' },
   { value: 'btPrev',  label: '⏮ Previous Song' },
+  { value: 'engineRestart', label: '🔄 Restart Engine' },
 ];
 
 export async function load() {

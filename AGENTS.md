@@ -57,7 +57,8 @@ tuning, key, wav, mid).
 
 - OSC in `udp:57120`: `/backtrack/play|stop|next|prev`,
   `/backtrack/load <name>`, `/midi/reload`, `/midi/learn/start|stop|cancel`,
-  `/config/routing_reload`, `/devices/refresh`.
+  `/config/routing_reload`, `/devices/refresh`, `/engine/restart`
+  (exits non-zero so systemd restarts the service).
 - OSC out `udp:9000`: `/oled/update <setlist> <artist> <song> <STATE> <tuning>`,
   `/oled/heartbeat <online:int> <playing:int>`.
 - `state.json` heartbeat: refreshed every 5 s; web `/api/health` treats
@@ -95,5 +96,7 @@ LANTH0N_DEVICES_JSON='...' ...                                # mock device snap
 
 `deploy/setup.sh` installs packages (portaudio, python, node, pip deps:
 sounddevice/soundfile/python-rtmidi/python-osc/luma.oled/Pillow), builds
-the web UI, installs the four systemd units. See [DEPLOY.md](DEPLOY.md).
+the web UI, installs the four systemd units + the sudoers rule that lets
+the web UI run `systemctl restart lanthon-engine` (POST /api/engine/restart
+fallback when the engine process is already dead). See [DEPLOY.md](DEPLOY.md).
 The Pi hostname is `L4NTH0N-5YNTH` (ssh alias `lanth0n` on the dev Mac).

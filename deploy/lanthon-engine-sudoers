@@ -1,0 +1,5 @@
+# lanthon-engine-sudoers — allow the web UI service user to restart the
+# playback engine without a password (used by POST /api/engine/restart as
+# a fallback when the engine process is already dead).
+# Installed to /etc/sudoers.d/lanthon-engine by deploy/setup.sh.
+%USER% ALL=(root) NOPASSWD: /usr/bin/systemctl restart lanthon-engine

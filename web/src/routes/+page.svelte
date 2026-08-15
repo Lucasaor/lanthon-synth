@@ -61,6 +61,25 @@
 
   async function prev() { await sendOSC('/backtrack/prev'); }
   async function next() { await sendOSC('/backtrack/next'); }
+
+  let restarting = false;
+  let restartMsg = '';
+
+  async function restartEngine() {
+    if (!confirm('Restart the playback engine? Playback will stop for a few seconds.')) return;
+    restarting = true;
+    restartMsg = 'Restarting engine…';
+    try {
+      const r = await fetch('/api/engine/restart', { method: 'POST' });
+      const d = await r.json();
+      restartMsg = r.ok
+        ? `✓ Engine restarting (${d.method}) — back in a few seconds`
+        : `✗ ${d.error ?? 'restart failed'}`;
+    } catch {
+      restartMsg = '✗ Request failed';
+    }
+    restarting = false;
+  }
 </script>
 
 <h1>Dashboard</h1>
@@ -120,6 +139,19 @@
       {busy ? 'Loading…' : 'Load to Rig'}
     </button>
   </div>
+</div>
+
+<div class="card">
+  <h2>Engine</h2>
+  <div class="row">
+    <button class="danger" on:click={restartEngine} disabled={restarting}>
+      {restarting ? 'Restarting…' : '🔄 Restart Engine'}
+    </button>
+    {#if restartMsg}<span style="color:#8f8; font-size:0.9rem">{restartMsg}</span>{/if}
+  </div>
+  <p style="color:#888; margin:0; font-size:0.8rem">
+    Stops playback and restarts the playback engine process (also mappable to a MIDI CC).
+  </p>
 </div>
 
 <div class="card">

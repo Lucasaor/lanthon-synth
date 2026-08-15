@@ -59,6 +59,8 @@ from engine.smf import write_smf  # noqa: E402
 SR = 48000
 BLOCK = 512
 
+EXIT_CALLS = []   # engine restart recorder (never actually exit the test process)
+
 
 def free_port():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -125,7 +127,8 @@ class TestRoutingWeb(unittest.TestCase):
         cls.web_port = free_port()
 
         cls.engine = Engine(offline=True, sample_rate=SR, block_size=BLOCK,
-                            osc_port=cls.osc_port, midi_in_enabled=False)
+                            osc_port=cls.osc_port, midi_in_enabled=False,
+                            exit_fn=lambda code: EXIT_CALLS.append(code))
         cls.engine.start()
         # serve the OSC control interface (web UI targets it)
         import threading
@@ -191,6 +194,19 @@ class TestRoutingWeb(unittest.TestCase):
                 return
             time.sleep(0.05)
         raise AssertionError("song never cued")
+
+    def test_engine_restart_endpoint(self):
+        """POST /api/engine/restart reaches the engine over OSC when online."""
+        before = len(EXIT_CALLS)
+        status, data = http_call("POST", self.web_port, "/api/engine/restart")
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["method"], "osc")  # engine heartbeat is fresh
+        deadline = time.monotonic() + 5.0
+        while len(EXIT_CALLS) == before and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(EXIT_CALLS), before + 1)
+        self.assertEqual(EXIT_CALLS[-1], 42)
 
     def test_devices_endpoint_reflects_engine_snapshot(self):
         # force a fresh snapshot so this test is order-independent

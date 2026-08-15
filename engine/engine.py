@@ -50,10 +50,12 @@ class Engine:
         midi_out_port: Optional[str] = None,
         midi_in_enabled: bool = True,
         backend=None,   # injectable for tests
+        exit_fn=None,   # injectable for tests (default os._exit)
     ):
         self.sr = sample_rate
         self.block_size = block_size
         self.offline = offline
+        self._exit_fn = exit_fn or os._exit
 
         self.transport = Transport(sample_rate)
         self.transport.add_listener(self._on_transport_change)
@@ -74,6 +76,7 @@ class Engine:
             "btStop": self.stop,
             "btNext": self.next_song,
             "btPrev": self.prev_song,
+            "engineRestart": self.restart_engine,
         })
         self.learn = LearnCapture()
         self.midi_in = MidiInputManager(self._on_midi_message, midi_in_enabled)
@@ -264,6 +267,31 @@ class Engine:
 
     def stop(self) -> None:
         self.transport.stop()
+
+    def restart_engine(self) -> None:
+        """Full engine restart: stop cleanly, mark offline, then exit with a
+        non-zero code so systemd restarts the service (Restart=on-failure).
+        Triggerable from the web UI and from a MIDI mapping."""
+        log.warning("engine restart requested — exiting for systemd restart")
+        try:
+            self.transport.stop()
+            self.backend.stop()
+        except Exception:
+            pass
+        try:
+            # written LAST so the final persisted state marks the engine
+            # offline (transport stop above may publish its own snapshot)
+            snap = self._snapshot()
+            snap["engineOnline"] = False
+            write_state(snap)
+        except Exception:
+            log.exception("could not write restart state")
+        try:
+            self.osc.oled_heartbeat(False, False)
+        except Exception:
+            pass
+        time.sleep(0.2)  # let the writes flush before the process dies
+        self._exit_fn(42)
 
     # ------------------------------------------------------------------
     # Audio block processing (called from the master stream callback)
@@ -516,6 +544,7 @@ class Engine:
         self.osc.on("/config/routing_reload", lambda *a: self.apply_routing())
         self.osc.on("/devices/refresh",
                     lambda *a: devices.write_devices_snapshot())
+        self.osc.on("/engine/restart", lambda *a: self.restart_engine())
         # compat: /ping (legacy web health probe) — kept for debugging tools
         self.osc.on("/ping", lambda addr, *a: log.debug("OSC /ping from %s", addr))
 
