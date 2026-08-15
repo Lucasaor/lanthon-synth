@@ -102,6 +102,8 @@ class Engine:
         self._audio_error_count = 0
         self._recovering = False
         self._recovery_lock = threading.Lock()
+        self._last_recovery_attempt: Optional[float] = None
+        self._streams_healthy = False
 
     # ------------------------------------------------------------------
     # MIDI output
@@ -150,7 +152,8 @@ class Engine:
                            device=None, n_out=8, routes=[], is_master=True)
             ]
         self.backend.stop()
-        self.backend.start(self._plans, self.sr, self.block_size)
+        if not self._start_streams():
+            log.warning("routing applied but audio streams could not open")
         log.info("routing applied: %d plan(s), MIDI out '%s'",
                  len(self._plans), self._midi_out_name or "(none)")
 
@@ -362,18 +365,34 @@ class Engine:
         if self._audio_error_count >= 3:
             self._start_audio_recovery()
 
+    def _start_streams(self) -> bool:
+        """Open the audio streams; tolerate missing/broken devices."""
+        try:
+            self.backend.start(self._plans, self.sr, self.block_size)
+            self._streams_healthy = True
+            return True
+        except Exception:
+            log.exception("could not open audio streams (no device?)")
+            self._streams_healthy = False
+            return False
+
     def _start_audio_recovery(self) -> None:
         """Re-enumerate devices and reopen the audio streams (hot-plug)."""
         if self.offline:
             return
+        now = time.monotonic()
+        if (self._last_recovery_attempt is not None
+                and now - self._last_recovery_attempt < 5.0):
+            return  # cooldown — don't hammer a broken kernel audio state
         if not self._recovery_lock.acquire(blocking=False):
             return
         if self._recovering:
             self._recovery_lock.release()
             return
         self._recovering = True
+        self._last_recovery_attempt = now
         self._recovery_lock.release()
-        log.warning("audio device error detected — recovering streams")
+        log.warning("audio recovery: re-enumerating devices and reopening streams")
 
         def do():
             try:
@@ -387,10 +406,14 @@ class Engine:
                         DevicePlan(key="default", name="default output",
                                    device=None, n_out=8, routes=[], is_master=True)
                     ]
-                self.backend.start(self._plans, self.sr, self.block_size)
-                log.info("audio recovery complete: %d plan(s)", len(self._plans))
+                if self._start_streams():
+                    log.info("audio recovery complete: %d plan(s)", len(self._plans))
+                else:
+                    log.warning("audio recovery: no usable output device yet "
+                                "— will retry automatically")
             except Exception:
                 log.exception("audio recovery failed — will retry")
+                self._streams_healthy = False
             finally:
                 self._audio_error_count = 0
                 self._recovering = False
@@ -459,6 +482,10 @@ class Engine:
             if (self.transport.playing and not self.offline
                     and time.monotonic() - self._last_callback > 3.0):
                 self._start_audio_recovery()
+            # no usable output device yet (or streams never opened): keep
+            # retrying so hot-plugging the interface self-heals the rig
+            if not self.offline and not self._streams_healthy:
+                self._start_audio_recovery()
 
     # ------------------------------------------------------------------
     # OSC control interface
@@ -493,7 +520,10 @@ class Engine:
         self.dispatcher.start()
         self.midi_in.start()
         self._heartbeat_thread.start()
-        self.backend.start(self._plans, self.sr, self.block_size)
+        # opening streams must never kill the engine: without an audio
+        # device the engine stays up (OSC/state/OLED work) and the
+        # recovery cycle reopens streams once hardware appears
+        self._start_streams()
         self._publish_state()
         log.info("Engine started (offline=%s, sr=%d, block=%d)",
                  self.offline, self.sr, self.block_size)

@@ -94,6 +94,30 @@ class TestAudioRecovery(unittest.TestCase):
         self.assertEqual(engine.backend.stops, 0)
         engine.shutdown()
 
+    def test_start_survives_missing_audio_device(self):
+        class FlakyBackend(FakeBackend):
+            def start(self, plans, sample_rate, block_size):
+                self.starts += 1
+                if self.starts == 1:
+                    raise RuntimeError("no audio output device")
+
+        engine = Engine(
+            offline=False, sample_rate=SR, block_size=BLOCK,
+            midi_in_enabled=False, backend=FlakyBackend(),
+        )
+        # must NOT raise — engine stays up with OSC/state/OLED functional
+        engine.start()
+        self.assertFalse(engine._streams_healthy)
+
+        # recovery cycle reopens the streams once a device appears
+        engine._start_audio_recovery()
+        deadline = time.monotonic() + 5.0
+        while not engine._streams_healthy and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(engine._streams_healthy)
+        self.assertEqual(engine.backend.starts, 2)
+        engine.shutdown()
+
 
 # ---------------------------------------------------------------------------
 # Fake rtmidi for probe-reuse checks

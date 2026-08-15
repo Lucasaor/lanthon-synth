@@ -77,3 +77,9 @@ class OscControl:
             except Exception:
                 pass
             self._server = None
+        if self._oled is not None:
+            try:
+                self._oled._sock.close()
+            except Exception:
+                pass
+            self._oled = None
