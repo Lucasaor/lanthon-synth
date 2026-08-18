@@ -36,7 +36,10 @@ Config: `config/audio_routing.json` (per-track device+channel),
 `config/midi_map.json` (channel-based transport mappings). Runtime files
 written by the engine: `state.json`, `devices.json`, `midi_learn.json`,
 `last_setlist.txt`. Setlists: `setlists/*.json` (song = name, artist,
-tuning, key, wav, mid).
+tuning, key, wav, mid). The `wav` field may point at a PCM `.wav` or a
+compressed `.m4a`/`.mp4`/`.aac` — compressed sources are decoded by
+ffmpeg into `media/.cache/*.wav` at cue time (per-Song, deleted on
+close; cache dir purged on engine start).
 
 ## Non-negotiable constraints
 
@@ -56,12 +59,15 @@ tuning, key, wav, mid).
 ## Engine protocol (web UI depends on this)
 
 - OSC in `udp:57120`: `/backtrack/play|stop|next|prev`,
+  `/backtrack/seek <seconds>`, `/backtrack/seek_by <delta-seconds>`,
   `/backtrack/load <name>`, `/midi/reload`, `/midi/learn/start|stop|cancel`,
   `/config/routing_reload`, `/devices/refresh`, `/engine/restart`
   (exits non-zero so systemd restarts the service).
-- OSC out `udp:9000`: `/oled/update <setlist> <artist> <song> <STATE> <tuning>`,
+- OSC out `udp:9000`: `/oled/update <setlist> <artist> <song> <STATE> <tuning>
+  <positionSec> <durationSec>`,
   `/oled/heartbeat <online:int> <playing:int>`.
-- `state.json` heartbeat: refreshed every 5 s; web `/api/health` treats
+- `state.json` heartbeat: refreshed every 5 s (+ once per second while
+  playing, so the position trackbar stays live); web `/api/health` treats
   > 15 s as offline.
 
 ## Key behaviours
@@ -69,6 +75,31 @@ tuning, key, wav, mid).
 - Next/Prev pre-cues the adjacent song in a background worker; switching
   **during playback auto-plays** the new song.
 - `play()` before the cue finishes latches (`Transport._pending_play`).
+- **Setlist hot-reload**: the 5 s heartbeat `_watch_setlist()` stats the
+  active setlist file (`_setlist_stat = (mtime_ns, size)`, recorded on
+  every `load_setlist`) and reloads it on change, auto-playing from song
+  0 if playback was active. Deleted file → keep the in-memory list.
+  `load_setlist(name, autoplay=False)` gains the autoplay kwarg. The web
+  setlists page also re-sends `/backtrack/load` on save when the edited
+  setlist is the active one.
+- **Audio device persistence**: a successful stream on the FALLBACK device
+  must not mask a missing configured interface — `_start_streams()` marks
+  `_streams_healthy=False` when `devices.missing_audio_devices()` reports
+  configured names absent, so the 5 s heartbeat keeps re-enumerating and
+  re-attaches once the interface appears. `_resolve_audio` never
+  substitutes another device for a named one (returns None → default
+  plan). CRITICAL: re-enumeration (apply_routing / recovery) must STOP
+  the streams BEFORE probing — a fallback stream on ALSA 'default' holds
+  the USB interface open and PortAudio then reports it with 0 output
+  channels (self-masking lock). `do_cue` reopens streams after rebuilding
+  plans (else the master stream never receives buffers). The OSC server
+  is a tolerant UDP server — malformed datagrams can't kill the engine.
+- **Seek** (`Transport.seek_to` / `Engine.seek`): clamps to song duration,
+  stores `_seek_frame`, recomputes `_next_event_idx` (bisect over sorted
+  SMF events) and clears the dispatcher queue. `stop()` keeps the seek
+  position; a second `stop()` while already stopped clears it (next play
+  from the top). Natural song end clears it too. `set_song` resets it.
+  MIDI actions: `btSeekFwd` (+5 s) / `btSeekBack` (−5 s).
 - Transport `set_song` must NOT call `self.stop()` (plain Lock deadlock).
 - Old songs close after a 500 ms deferral (in-flight C-level reads).
 - CC transport triggers need a rising edge ≥ 64; notes trigger on

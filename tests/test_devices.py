@@ -152,12 +152,29 @@ class TestResolution(unittest.TestCase):
         self.assertEqual([(r.wav_ch, r.out_ch) for r in second.routes], [(2, 0)])
         self.assertFalse(second.is_master)
 
-    def test_unknown_device_falls_back_to_default(self):
+    def test_unknown_device_falls_back_to_default_plan(self):
         cfg = {"tracks": {"click": {"device": "Not Plugged In", "channel": 1}}}
         plans = self._plans(cfg)
-        # click ends up on the default audio device
-        default = next(p for p in plans if p.key == "audio:0")
+        # a missing named device must NOT be silently substituted by
+        # another enumerated device — the track lands on the default
+        # fallback plan (device=None → system default) instead
+        self.assertIsNone(devices._resolve_audio(cfg["tracks"]["click"], self.snap))
+        default = next(p for p in plans if p.key == "default")
+        self.assertIsNone(default.device)
         self.assertTrue(any(r.wav_ch == 2 for r in default.routes))
+
+    def test_missing_audio_devices_reported(self):
+        cfg = {"tracks": {
+            "playback_l": {"device": "Mock USB 8ch", "channel": 1},
+            "playback_r": {"device": "Mock USB 8ch", "channel": 2},
+            "click": {"device": "Gone Away Interface", "channel": 1},
+            "cue": {"device": "Mock USB 2ch", "channel": 2},
+        }}
+        missing = devices.missing_audio_devices(cfg, self.snap)
+        self.assertEqual(missing, ["Gone Away Interface"])
+        # auto tracks never count as missing
+        cfg["tracks"]["click"]["device"] = "auto"
+        self.assertEqual(devices.missing_audio_devices(cfg, self.snap), [])
 
     def test_timecode_disabled_by_default(self):
         cfg = {"tracks": {}}

@@ -24,6 +24,8 @@ export async function GET() {
     key:           state.key ?? null,
     positionSec:   state.positionSec ?? 0,
     durationSec:   state.durationSec ?? 0,
+    seekSec:       state.seekSec ?? null,
+    cueError:      state.cueError ?? null,
     songIndex:     state.songIndex ?? 0,
     songCount:     state.songCount ?? 0,
   });

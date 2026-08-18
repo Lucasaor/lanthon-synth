@@ -10,5 +10,9 @@ export async function load() {
     artist:        state.artist ?? null,
     playing:       state.playing === true || state.playing === 'true',
     tuning:        state.tuning ?? null,
+    positionSec:   state.positionSec ?? 0,
+    durationSec:   state.durationSec ?? 0,
+    seekSec:       state.seekSec ?? null,
+    cueError:      state.cueError ?? null,
   };
 }

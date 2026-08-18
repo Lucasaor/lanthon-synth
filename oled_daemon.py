@@ -8,13 +8,14 @@ renders the current playback state to a 0.96" SSD1306 I2C OLED display
 
 Display layout (128×64, blue region top row, yellow region bottom rows):
   Line 1 (top, blue):   Setlist name
-  Line 2:               Artist name
+  Line 2:               Artist · tuning
   Line 3:               Song name
-  Line 4 (bottom):      [PLAYING / STOP]  <tuning>   (e.g. "Drop D")
+  Line 4 (bottom):      [PLAYING / STOP]  pos/duration   (e.g. "PLAYING 1:54/4:12")
 
 OSC interface (UDP, default port 9000):
   /oled/update  <setlistName> <artist> <songName> <state> <tuning>
-    Example: /oled/update "Night 1" "Tool" "Sober" "PLAYING" "Drop D"
+                <positionSec> <durationSec>
+    Example: /oled/update "Night 1" "Tool" "Sober" "PLAYING" "Drop D" 114.0 252.0
 
 Requirements (install on Pi):
   pip3 install luma.oled python-osc Pillow
@@ -67,6 +68,8 @@ class DisplayState:
     song_name: str = "—"
     playback_state: str = "STOP"   # "PLAYING", "STOP" or "CUED"
     tuning: str = "—"              # e.g. "Drop D", "Standard E"
+    position_sec: float = 0.0      # current playback position
+    duration_sec: float = 0.0      # total song duration
     sc_online: bool = False        # True when engine heartbeat is recent
     sc_playing: bool = False       # True when engine reports playback active
     dirty: bool = True             # True = needs re-render
@@ -79,7 +82,8 @@ _last_heartbeat = 0.0
 HEARTBEAT_TIMEOUT = 45.0   # seconds before the engine is considered offline
 
 def update_state(setlist_name: str, artist: str, song_name: str,
-                 playback_state: str, tuning: str) -> None:
+                 playback_state: str, tuning: str,
+                 position_sec: float = 0.0, duration_sec: float = 0.0) -> None:
     global _state
     with _state_lock:
         _state.setlist_name   = setlist_name[:20] or "—"
@@ -87,8 +91,18 @@ def update_state(setlist_name: str, artist: str, song_name: str,
         _state.song_name      = song_name[:20] or "—"
         _state.playback_state = playback_state or "STOP"
         _state.tuning         = str(tuning) or "—"
+        try:
+            _state.position_sec = max(0.0, float(position_sec))
+        except (TypeError, ValueError):
+            _state.position_sec = 0.0
+        try:
+            _state.duration_sec = max(0.0, float(duration_sec))
+        except (TypeError, ValueError):
+            _state.duration_sec = 0.0
         _state.dirty = True
-    log.info("State: %s | %s — %s | Tuning: %s", playback_state, artist, song_name, tuning)
+    log.info("State: %s | %s — %s | Tuning: %s | %.1f/%.1f s",
+             playback_state, artist, song_name, tuning,
+             _state.position_sec, _state.duration_sec)
 
 def handle_heartbeat(online: int, playing: int) -> None:
     """Receive periodic heartbeat from the playback engine to confirm it's alive."""
@@ -120,13 +134,16 @@ def start_osc_server() -> None:
 
     def oled_update_handler(address, *args):
         # Expected: /oled/update setlist artist song state tuning
+        #                                  position_sec duration_sec
         try:
             setlist = str(args[0]) if len(args) > 0 else "—"
             artist  = str(args[1]) if len(args) > 1 else "—"
             song    = str(args[2]) if len(args) > 2 else "—"
             state   = str(args[3]) if len(args) > 3 else "STOP"
             tuning  = str(args[4]) if len(args) > 4 else "—"
-            update_state(setlist, artist, song, state, tuning)
+            pos     = float(args[5]) if len(args) > 5 else 0.0
+            dur     = float(args[6]) if len(args) > 6 else 0.0
+            update_state(setlist, artist, song, state, tuning, pos, dur)
         except Exception as exc:
             log.warning("Bad OSC message: %s", exc)
 
@@ -176,14 +193,34 @@ def init_display():
         return None
 
 
+def fmt_time(sec: float) -> str:
+    """Format seconds as m:ss (or h:mm:ss when ≥ 1 h)."""
+    try:
+        sec = max(0, int(round(float(sec))))
+    except (TypeError, ValueError):
+        sec = 0
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def fit_text(draw, text: str, font, max_px: int) -> str:
+    """Truncate text until it fits within max_px pixels."""
+    while text and draw.textlength(text, font=font) > max_px:
+        text = text[:-1]
+    return text
+
+
 def render(device, state: DisplayState) -> None:
     """
     Render the current state to the OLED display.
     Layout:
       Row 0 (y=0):  Setlist name  (small, top blue region)
-      Row 1 (y=14): Artist         (small)
+      Row 1 (y=14): Artist · tuning (small)
       Row 2 (y=28): Song name      (small, may truncate)
-      Row 3 (y=44): [STATE]  <tuning>  (large, bottom yellow region)
+      Row 3 (y=44): [STATE]  pos/duration  (large, bottom yellow region)
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -210,13 +247,19 @@ def render(device, state: DisplayState) -> None:
     # engine status indicator in top-right corner
     draw.text((DISPLAY_W - 18, 0), f"E{status_dot}", font=font_sm,
               fill=255 if state.sc_online else 128)
-    # Line 2: artist
-    draw.text((0, 14), state.artist[:18],        font=font_sm, fill=255)
+    # Line 2: artist + tuning (e.g. "Tool · Drop D"), pixel-fitted
+    tuning = state.tuning if state.tuning and state.tuning != "—" else ""
+    line2 = state.artist[:18] if state.artist and state.artist != "—" else "—"
+    if tuning:
+        line2 = f"{line2} · {tuning}"
+    draw.text((0, 14), fit_text(draw, line2, font_sm, DISPLAY_W - 4),
+              font=font_sm, fill=255)
     # Line 3: song name
     draw.text((0, 28), state.song_name[:18],     font=font_sm, fill=255)
-    # Line 4: state + tuning (larger, in the bottom yellow region)
-    state_str = f"{state.playback_state}  {state.tuning}"
-    # Auto-shrink if the tuning label would overflow the 128px width
+    # Line 4: state + position/duration (larger, in the bottom yellow region)
+    state_str = (f"{state.playback_state}  "
+                 f"{fmt_time(state.position_sec)}/{fmt_time(state.duration_sec)}")
+    # Auto-shrink if the status line would overflow the 128px width
     font = font_lg
     if draw.textlength(state_str, font=font_lg) > DISPLAY_W - 4:
         font = font_sm
@@ -227,7 +270,7 @@ def render(device, state: DisplayState) -> None:
     else:
         # Mock: log what would be displayed
         log.debug("MOCK render: [%s] [%s] [%s] [%s]",
-                  state.setlist_name, state.artist, state.song_name, state_str)
+                  state.setlist_name, line2, state.song_name, state_str)
 
 
 def render_loop(device) -> None:

@@ -139,3 +139,23 @@ WAV + MIDI automation player. Evidence per build step (dev machine,
 - Realtime MIDI dispatch is scheduled against PortAudio's DAC time with
   sub-millisecond busy-spin; the dispatcher logs mean/max offset every
   200 events so accuracy is observable on the Pi.
+
+## M4A/AAC support (Aug 17/18)
+
+Bulk WAVs → compressed 4-track M4A (ch1-2 VS, ch3 Click, ch4 Dica).
+
+- `engine/song.py`: `AAC_EXTS = {.m4a,.mp4,.aac,.m4b}`; cue() decodes via
+  ffmpeg into `media/.cache/<tmp>.wav` (pcm_s16le), streams/seeks from
+  that; cache deleted on close (per-Song) and purged on engine start.
+  `engine/paths.py`: `CACHE_DIR`.
+- Web: upload whitelist + chunked endpoint + Files page accept + setlists
+  auto-fill now include m4a/mp4/aac.
+- Also fixed: a failed cue left the previous setlist's song cued (stale
+  playback + stale cache) — do_cue now clears the transport song when
+  the failing song is a different object.
+- Tests: `TestM4aDecode` (3: cue/read/seek/cache-cleanup, offline render,
+  decode-failure) + stale-song test + cache-purge test — 9/9 modules PASS.
+- Live verification (Pi): synthetic 4-ch AAC files (full VS + click/dica
+  only) uploaded → "decoded 'full.m4a' → cached WAV (4504 kB)",
+  "Cued song ... 4 ch, 12.0 s", CS202 stream, play/seek(+8s)/next
+  (click-only song auto-played)/stop all work; cache emptied after unload.

@@ -14,19 +14,34 @@ buttons call the exact same actions** — there is one control path.
 | Stop | ■ | your button |
 | Next song | ⏭ | your button |
 | Previous song | ⏮ | your button |
+| Seek (absolute) | trackbar / m:ss box | — |
+| Seek +5 s / −5 s | dashboard buttons | your button |
 | Restart engine | 🔄 dashboard → Engine | your button |
 
 Behaviour:
 
-- **Play** — starts the current song from the top.
-- **Stop** — halts playback and rewinds to the start of the song; the next
-  Play starts from the top (full stop, not a pause).
+- **Play** — starts the current song from the top (or from a pending
+  seek position, see below).
+- **Stop** — halts playback. With a seek position set, the next Play
+  starts back from the seek time; without one it rewinds to the start
+  (full stop, not a pause). Pressing Stop **again while already
+  stopped** clears the seek — the next Play starts from the beginning.
+- **Seek** — jump to an exact time while playing or stopped: drag the
+  dashboard trackbar, type `m:ss` (e.g. `1:54`) in the box and press
+  Seek, or use the ±5 s buttons. MIDI `btSeekFwd` / `btSeekBack` jump
+  5 s. Seeking locks the MIDI automation to the same position (events
+  scheduled for the skipped range are dropped).
 - **Next / Prev** — loads the adjacent song instantly (it was pre-cued in
   the background). If playback was active, the new song **auto-plays**.
 - **Song end** — playback stops automatically and rewinds to the top of the
-  song.
+  song (a pending seek is cleared).
 - **Load setlist** — dashboard "Load to Rig" or setlists page; the rig
-  remembers the last setlist across reboots.
+  remembers the last setlist across reboots. Saving an edited setlist
+  that is currently loaded pushes it into the engine immediately, and
+  the engine also watches the active setlist file on disk (5 s check) —
+  edits are picked up automatically, even when made via scp/ssh.
+  If playback was active, the reloaded setlist auto-plays from its first
+  song.
 - **Restart engine** — stops playback and restarts the engine process
   (dashboard → Engine → 🔄, or a mapped MIDI CC). systemd brings it back
   in ~5 s; the web UI and OLED show it offline briefly, then online.
@@ -60,7 +75,8 @@ Mapping rules:
   while held).
 - `pgm` — triggers on any program change.
 - Available actions: `btPlay`, `btStop`, `btNext`, `btPrev`,
-  `engineRestart` (same restart as the dashboard button).
+  `btSeekFwd` (+5 s), `btSeekBack` (−5 s), `engineRestart` (same restart
+  as the dashboard button).
 - The engine listens on **all connected MIDI input ports** (USB and
   Bluetooth, re-scanned every 2 s) — no device-specific setup needed.
 
@@ -80,7 +96,7 @@ with the proper content-type, or restart `lanthon-engine`.
 
 | Page | What it does |
 |---|---|
-| Dashboard | transport buttons, setlist load, live engine state |
+| Dashboard | transport buttons, position trackbar + `m:ss` seek, ±5 s, setlist load, live engine state |
 | Files | upload per-song WAV + MID files |
 | Setlists | songs with WAV, MID, **tuning** (standard/drop), **key** (C…B) |
 | MIDI Map | MIDI-learn transport mapping |
@@ -103,7 +119,10 @@ For each logical track choose the destination **device** and **channel**:
 - The device list refreshes live (engine every 5 s, screen every 3 s) —
   a hot-plugged interface appears without a restart.
 - A track pointing at a disconnected device falls back to the default
-  output (warning shown in the UI).
+  output (warning shown in the UI), and the engine **keeps re-enumerating
+  every 5 s until the configured interface (re)appears** — then it
+  re-attaches automatically, even at boot when the USB interface
+  enumerates later than the engine.
 - **Clock device** selects which audio stream drives the transport; the
   default is the device carrying Playback L/R.
 
@@ -112,25 +131,36 @@ For each logical track choose the destination **device** and **channel**:
 | Line | Content |
 |---|---|
 | 1 (top) | setlist name + engine online dot `E●` |
-| 2 | artist |
+| 2 | artist + tuning (`Tool · Drop D`) |
 | 3 | song name |
-| 4 | state — `PLAYING` / `STOP` / `CUED` — + tuning label (`Drop D` / `Standard E`) |
+| 4 | state — `PLAYING` / `STOP` / `CUED` — + position/duration (`PLAYING 1:54/4:12`) |
 
-Updates arrive over OSC whenever the engine state changes; the heartbeat
-dot goes dark if the engine is offline for > 45 s. The display works fully
-standalone — the web UI does not need to be open.
+Updates arrive over OSC whenever the engine state changes, and once a
+second while a song is playing (keeps the position timer live); the
+heartbeat dot goes dark if the engine is offline for > 45 s. The display
+works fully standalone — the web UI does not need to be open.
 
 ## Song files
 
 Per song, two files in `media/`:
 
-- `<song>.wav` — **multichannel, interleaved, 48 kHz**: ch1 L, ch2 R,
-  ch3 Click, ch4 Cue, optional ch5 Timecode. Render from Reaper with the
-  project sample rate set to 48000.
+- `<song>.wav` **or** `<song>.m4a` — **multichannel, interleaved,
+  48 kHz**: ch1 VS L, ch2 VS R, ch3 Click, ch4 Cue, optional ch5
+  Timecode. Render from Reaper with the project sample rate set to
+  48000. WAV (PCM) and M4A/AAC are both accepted — M4A keeps uploads
+  and disk use small; the engine decodes it to a temporary cached WAV
+  at cue time (deleted when the song is unloaded, so only the currently
+  cued song(s) use extra space). Some songs only contain Click + Dica —
+  export them with the same 4-channel layout and silent VS channels.
 - `<song>.mid` — automation (PC/CC) with its own tempo map; events are
   converted to audio frames using the file's tempo so they stay locked
   to the audio. No tempo field exists in the setlist — the MIDI file
   **is** the timing source for automation.
 
-The engine streams the WAV from disk (never loads it whole) and parses the
-MIDI once at cue time — memory use is flat regardless of song length.
+Reaper export recipe for M4A: render the four tracks
+`Master/VS` (1-2), `Click` (3), `Dica` (4) → Format: **MPEG-4/AAC**,
+Sample rate 48000, Channels 4. Then upload the `.m4a` via the Files page
+and assign it on the Setlists page (AUDIO dropdown).
+
+The engine streams the audio from disk (never loads it whole) and parses
+the MIDI once at cue time — memory use is flat regardless of song length.

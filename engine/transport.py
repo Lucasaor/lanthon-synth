@@ -9,8 +9,10 @@ States:
     cued    — song loaded and ready, position 0
     playing — rendering
 
-stop() is a FULL STOP, not a pause: it halts playback and rewinds to the
-start of the song, so the next play() starts from the top.
+stop() is a FULL STOP, not a pause: it halts playback. Without a seek
+position the next play() starts from the top; with one (seek_to), play()
+resumes from the seek time. A second stop() while already stopped clears
+the seek and rewinds to the start.
 
 The audio backend advances position_frame block by block; everything else
 (web UI state, OLED, MIDI) reads it back.
@@ -38,6 +40,9 @@ class Transport:
         self.song: Optional[Song] = None
         self.position_frame = 0
         self._pending_play = False
+        # pending seek position (frames): survives stop() → play() cycles
+        # until a second stop() with the transport already stopped clears it
+        self._seek_frame: Optional[int] = None
         self._lock = threading.Lock()
         # listeners: (fn, kwargs) invoked on every state change
         self._listeners: List[Callable] = []
@@ -59,6 +64,7 @@ class Transport:
             old = self.song
             self.song = song
             self.position_frame = 0
+            self._seek_frame = None  # a new song always starts from the top
             if song is None:
                 self.state = STOPPED
                 self._pending_play = False
@@ -86,17 +92,55 @@ class Transport:
                 self._pending_play = True
                 return
             if self.position_frame >= self.song.frames:
+                # seek landed at/after the end — restart from the top and
+                # drop the pending seek so stop() won't restore it later
                 self.position_frame = 0
+                self._seek_frame = None
             self.state = PLAYING
         self._notify()
 
-    def stop(self) -> None:
-        """Full stop (not pause): halt playback and rewind to frame 0 so
-        the next play() starts from the top of the song."""
+    def seek_to(self, seconds: float) -> int:
+        """Jump to an absolute position (seconds) in the current song.
+
+        Clamps to [0, song duration], stores it as the pending seek and
+        returns the resulting frame. The seek survives stop() → play()
+        cycles; see stop().
+        """
         with self._lock:
-            if self.state == PLAYING:
+            song = self.song
+            max_frame = song.frames if song is not None else 0
+            frame = int(round(float(seconds) * self.sample_rate))
+            frame = max(0, min(frame, max_frame))
+            self._seek_frame = frame
+            self.position_frame = frame
+        self._notify()
+        return frame
+
+    def clear_seek(self) -> None:
+        with self._lock:
+            self._seek_frame = None
+
+    def seek_sec(self) -> Optional[float]:
+        if self._seek_frame is None:
+            return None
+        return self._seek_frame / self.sample_rate
+
+    def stop(self) -> None:
+        """Stop playback.
+
+        With a seek position set, the next play() resumes from it;
+        without one, playback rewinds to the top. Pressing stop a second
+        time while already stopped clears the seek, so the following
+        play() starts from the beginning again."""
+        with self._lock:
+            if self.state == STOPPED:
+                # second stop clears any pending seek
+                self._seek_frame = None
+                self.position_frame = 0
+            else:
                 self.state = STOPPED
-            self.position_frame = 0
+                self.position_frame = (
+                    self._seek_frame if self._seek_frame is not None else 0)
         self._notify()
 
     @property

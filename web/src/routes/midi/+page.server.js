@@ -5,6 +5,8 @@ const ACTIONS = [
   { value: 'btStop',  label: '■ Stop' },
   { value: 'btNext',  label: '⏭ Next Song' },
   { value: 'btPrev',  label: '⏮ Previous Song' },
+  { value: 'btSeekFwd',  label: '⏩ Seek +5 s' },
+  { value: 'btSeekBack', label: '⏪ Seek −5 s' },
   { value: 'engineRestart', label: '🔄 Restart Engine' },
 ];
 

@@ -29,12 +29,23 @@
     // Strip legacy fields before persisting
     editing.songs = (editing.songs ?? []).map(
       ({ tempo, vs, click, dica, ...song }) => song);
-    await fetch(`/api/setlists/${editing._name}`, {
+    const r = await fetch(`/api/setlists/${editing._name}`, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(editing),
     });
-    alert('Saved!');
+    if (!r.ok) {
+      alert('Save failed');
+      return;
+    }
+    // If the saved setlist is the one loaded on the rig, push it into
+    // the engine right away so the changes are picked up immediately.
+    if (editing._name === data.activeSetlist) {
+      await activateSetlist(editing._name);
+      alert('Saved! Engine reloaded with the updated setlist.');
+    } else {
+      alert('Saved!');
+    }
   }
 
   async function create() {
@@ -119,7 +130,7 @@
     for (const f of mediaFiles) {
       const fLower = f.toLowerCase();
       if (!fLower.includes(lower)) continue;
-      if (!found.wav && /\.(wav|flac|aiff?)$/.test(fLower)) found.wav = f;
+      if (!found.wav && /\.(wav|flac|aiff?|m4a|mp4|aac)$/.test(fLower)) found.wav = f;
       if (!found.mid && /\.(midi?)$/.test(fLower)) found.mid = f;
     }
 
@@ -181,9 +192,9 @@
         <button class="danger" on:click={() => editing.songs.splice(i, 1) && (editing.songs = editing.songs)}>✕</button>
       </div>
       <div class="row" style="margin-top:6px; gap:4px; flex-wrap:wrap">
-        <label style="font-size:0.8rem; flex:none; width:40px">WAV:</label>
+        <label style="font-size:0.8rem; flex:none; width:40px">AUDIO:</label>
         <select bind:value={song.wav} style="flex:1; min-width:180px; font-size:0.8rem"
-          title="Multichannel backing track (L, R, Click, Cue + optional Timecode)">
+          title="Multichannel backing track (1=L, 2=R, 3=Click, 4=Cue) — WAV or M4A/AAC">
           <option value="">(none)</option>
           {#each matchingFiles(song.name, 'wav') as f}
             <option value={f}>{f}</option>

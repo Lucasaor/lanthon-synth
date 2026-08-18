@@ -201,7 +201,36 @@ def _resolve_audio(track_cfg: dict, snap: Snapshot) -> Optional[AudioDevice]:
         for dev in snap.audio:
             if want.lower() in dev.name.lower():
                 return dev
+        # the configured device is not in the live snapshot — never
+        # silently substitute another one; the engine keeps re-enumerating
+        # until it (re)appears (hot-plug persistence).
+        log.warning("configured audio device '%s' not found in live snapshot "
+                    "— falling back to system default until it appears", want)
+        return None
     return snap.audio[0]
+
+
+def missing_audio_devices(cfg: dict, snap: Snapshot) -> List[str]:
+    """Configured (non-auto) audio device names absent from the snapshot.
+
+    Used by the engine to keep the recovery cycle alive while a USB
+    interface is unplugged / not yet enumerated — without this, a
+    successful stream on the fallback device would mask the missing
+    interface forever.
+    """
+    tracks = cfg.get("tracks") or {}
+    names = [d.name.lower() for d in snap.audio]
+    missing: List[str] = []
+    for track in ("playback_l", "playback_r", "click", "cue"):
+        want = str((tracks.get(track) or {}).get("device") or AUTO)
+        if want != AUTO and want and not any(want.lower() in n for n in names):
+            missing.append(want)
+    tcfg = tracks.get("timecode") or {}
+    want = str(tcfg.get("device") or AUTO)
+    if (tcfg.get("enabled") is True and want != AUTO and want
+            and not any(want.lower() in n for n in names)):
+        missing.append(want)
+    return missing
 
 
 def _resolve_midi_out(track_cfg: dict, snap: Snapshot) -> Optional[str]:

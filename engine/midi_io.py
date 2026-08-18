@@ -131,6 +131,12 @@ class MidiDispatcher(threading.Thread):
         self.recorded.append((frame, msg))
         self._sent += 1
 
+    def clear_pending(self) -> None:
+        """Drop all not-yet-sent events. Used when seeking so events
+        scheduled from the old position don't fire late."""
+        with self._cond:
+            self._queue.clear()
+
     # -- dispatcher thread -------------------------------------------------
 
     def _now_stream(self) -> float:
@@ -190,7 +196,8 @@ class MidiDispatcher(threading.Thread):
 # Transport mapping (MIDI in → actions)
 # ---------------------------------------------------------------------------
 
-ACTIONS = ("btPlay", "btStop", "btNext", "btPrev")
+ACTIONS = ("btPlay", "btStop", "btNext", "btPrev",
+           "btSeekFwd", "btSeekBack")
 
 # status → (event type, data bytes used for "value", min/max range)
 _NOTE_ON = 0x90

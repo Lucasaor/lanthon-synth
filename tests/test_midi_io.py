@@ -136,11 +136,12 @@ class TestVirtualPortEndToEnd(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="lanth0n-midie2e-")
         media = str(paths.MEDIA_DIR)
         os.makedirs(media, exist_ok=True)
-        wav, mid = make_fixture_song(self.dir, "A")
+        # 30 s songs so the ±5 s seek increments are observable
+        wav, mid = make_fixture_song(self.dir, "A", seconds=30.0)
         import shutil
         shutil.copy(os.path.join(self.dir, wav), os.path.join(media, wav))
         shutil.copy(os.path.join(self.dir, mid), os.path.join(media, mid))
-        wav2, mid2 = make_fixture_song(self.dir, "B")
+        wav2, mid2 = make_fixture_song(self.dir, "B", seconds=30.0)
         shutil.copy(os.path.join(self.dir, wav2), os.path.join(media, wav2))
         shutil.copy(os.path.join(self.dir, mid2), os.path.join(media, mid2))
         setlists = str(paths.SETLISTS_DIR)
@@ -159,6 +160,8 @@ class TestVirtualPortEndToEnd(unittest.TestCase):
                 {"chan": 0, "type": "cc", "value": 64, "action": "btStop"},
                 {"chan": 0, "type": "note", "value": 38, "action": "btNext"},
                 {"chan": 0, "type": "note", "value": 37, "action": "btPrev"},
+                {"chan": 0, "type": "cc", "value": 65, "action": "btSeekFwd"},
+                {"chan": 0, "type": "cc", "value": 66, "action": "btSeekBack"},
             ]}, f)
 
         self.engine = Engine(offline=True, sample_rate=SR, block_size=BLOCK,
@@ -230,6 +233,34 @@ class TestVirtualPortEndToEnd(unittest.TestCase):
         self.assertEqual(self.engine.song_index, 0)
         s = self._state_file()
         self.assertEqual(s["songName"], "A")
+
+    def test_midi_seek_actions(self):
+        """btSeekFwd / btSeekBack mapped to CC 65/66: ±5 s per press."""
+        self._wait_port_open()
+        t = self.engine.transport
+        # +5 s while stopped
+        self._send([0xB0, 65, 127])
+        self.assertAlmostEqual(t.position_sec(), 5.0, places=3)
+        self._send([0xB0, 65, 0])     # release so the CC edge re-arms
+        # −5 s back to the top
+        self._send([0xB0, 66, 127])
+        self.assertAlmostEqual(t.position_sec(), 0.0, places=3)
+        self._send([0xB0, 66, 0])
+        # two +5 s presses (release between so the CC edge re-triggers)
+        self._send([0xB0, 65, 127])
+        self._send([0xB0, 65, 0])
+        self._send([0xB0, 65, 127])
+        self._send([0xB0, 65, 0])
+        self.assertAlmostEqual(t.position_sec(), 10.0, places=3)
+        # seek persists through stop → play
+        self._send([0x90, 36, 100])   # play
+        self.assertTrue(t.playing)
+        self._send([0xB0, 64, 127])   # stop
+        self.assertFalse(t.playing)
+        self.assertAlmostEqual(t.position_sec(), 10.0, places=3)
+        self._send([0x90, 36, 100])   # play again → resumes at 10 s
+        self.assertTrue(t.playing)
+        self.assertAlmostEqual(t.position_sec(), 10.0, places=3)
 
     def test_web_and_midi_share_one_control_path(self):
         """Same actions from the web path (direct method calls, as the OSC

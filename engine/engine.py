@@ -12,6 +12,7 @@ import logging
 import os
 import threading
 import time
+from bisect import bisect_left
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
@@ -77,6 +78,8 @@ class Engine:
             "btNext": self.next_song,
             "btPrev": self.prev_song,
             "engineRestart": self.restart_engine,
+            "btSeekFwd": lambda: self.seek_by(5.0),
+            "btSeekBack": lambda: self.seek_by(-5.0),
         })
         self.learn = LearnCapture()
         self.midi_in = MidiInputManager(self._on_midi_message, midi_in_enabled)
@@ -88,6 +91,8 @@ class Engine:
         self.setlist_name: Optional[str] = None
         self.song_index = 0
         self._next_event_idx = 0
+        self._setlist_stat: Optional[tuple] = None  # (mtime_ns, size) watch
+        self._cue_error: Optional[str] = None       # surfaced to the web UI
         self._cue_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cue")
         self._stop_offline = False
 
@@ -137,6 +142,10 @@ class Engine:
         """Reload routing config + device snapshot; swap MIDI output and
         restart audio streams with the new channel mapping."""
         self._routing_cfg = devices.load_routing()
+        # release the current streams BEFORE probing: a stream on ALSA
+        # 'default' can hold the configured USB interface open, hiding it
+        # from PortAudio's enumeration (device reports 0 output channels)
+        self.backend.stop()
         self._dev_snapshot = devices.snapshot()
         midi_name = devices._resolve_midi_out(
             (self._routing_cfg.get("tracks") or {}).get("midi_automation") or {},
@@ -155,7 +164,6 @@ class Engine:
                 DevicePlan(key="default", name="default output",
                            device=None, n_out=8, routes=[], is_master=True)
             ]
-        self.backend.stop()
         if not self._start_streams():
             log.warning("routing applied but audio streams could not open")
         log.info("routing applied: %d plan(s), MIDI out '%s'",
@@ -165,7 +173,7 @@ class Engine:
     # Setlist / song management
     # ------------------------------------------------------------------
 
-    def load_setlist(self, name: str) -> bool:
+    def load_setlist(self, name: str, autoplay: bool = False) -> bool:
         name = name.removesuffix(".json").strip()
         path = paths.SETLISTS_DIR / f"{name}.json"
         try:
@@ -203,8 +211,42 @@ class Engine:
         self.song_index = 0
         write_last_setlist(name)
         log.info("setlist '%s' loaded: %d song(s)", name, len(songs))
-        self._goto(0, autoplay=False)
+        try:
+            st = path.stat()
+            self._setlist_stat = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            self._setlist_stat = None
+        self._goto(0, autoplay=autoplay)
         return bool(songs)
+
+    def _watch_setlist(self) -> None:
+        """Hot-reload the active setlist when its file changes on disk.
+
+        Edits made through the web UI (or scp/ssh) are picked up within
+        one heartbeat tick without a manual 'Load to Rig'. If playback
+        was active, the reloaded setlist auto-plays from its first song.
+        """
+        name = self.setlist_name
+        if not name:
+            return
+        path = paths.SETLISTS_DIR / f"{name}.json"
+        try:
+            st = path.stat()
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+        if sig == self._setlist_stat:
+            return
+        if sig is None:
+            # file vanished (e.g. deleted via the web UI) — keep the
+            # current in-memory list playing rather than tearing down
+            log.warning("setlist '%s' disappeared on disk — keeping current "
+                        "song list", name)
+            self._setlist_stat = None
+            return
+        was_playing = self.transport.playing
+        log.info("setlist '%s' changed on disk — reloading", name)
+        self.load_setlist(name, autoplay=was_playing)
 
     def _song_at(self, index: int) -> Optional[Song]:
         if self.setlist is None:
@@ -220,6 +262,7 @@ class Engine:
         if song is None:
             self.transport.set_song(None)
             self.song_index = index
+            self._cue_error = None
             self._publish_state()
             return
         self.song_index = index
@@ -229,11 +272,26 @@ class Engine:
                 song.cue()
             except Exception as exc:
                 log.error("failed to cue '%s': %s", song.name, exc)
+                self._cue_error = f"could not load '{song.name}': {exc}"
+                if self.transport.song is not song:
+                    # the transport still holds a song from a previous
+                    # setlist context — don't leave it playable under
+                    # the new setlist (stale song + stale cache)
+                    self.transport.set_song(None)
                 song.close()
+                self._publish_state()
                 return
+            self._cue_error = None
             self._plans = self.build_plans(song)
             self._next_event_idx = 0
             self.transport.set_song(song)
+            # reopen the streams for the new plans: the startup stream was
+            # opened for the bare default plan, and this song's plans may
+            # key/route to different devices — without the reopen the
+            # master stream never receives buffers (silent playback)
+            self.backend.stop()
+            if not self._start_streams():
+                log.warning("song cued but audio streams could not open")
             if autoplay:
                 self.transport.play()
             self._publish_state()
@@ -267,6 +325,39 @@ class Engine:
 
     def stop(self) -> None:
         self.transport.stop()
+
+    # ------------------------------------------------------------------
+    # Seek
+    # ------------------------------------------------------------------
+
+    def seek(self, seconds: float) -> None:
+        """Jump to an absolute position (seconds) in the current song.
+
+        Recomputes the MIDI dispatch pointer and drops already-scheduled
+        events so automation stays locked to the new position."""
+        t = self.transport
+        song = t.song
+        if song is None or not song.open:
+            log.info("seek ignored: no song cued")
+            return
+        frame = t.seek_to(seconds)
+        if song.smf is not None:
+            # events are sorted by frame — restart dispatch from the new
+            # position (binary search; no full scan)
+            self._next_event_idx = bisect_left(
+                song.smf.events, frame, key=lambda ev: ev.frame)
+        if not self.offline:
+            self.dispatcher.clear_pending()
+        log.info("seek to %.2f s (frame %d)", frame / self.sr, frame)
+        self._publish_state()
+
+    def seek_by(self, delta: float) -> None:
+        """Relative seek (e.g. +5 s / −5 s MIDI mappings)."""
+        t = self.transport
+        if t.song is None or not t.song.open:
+            log.info("seek ignored: no song cued")
+            return
+        self.seek(t.position_sec() + delta)
 
     def restart_engine(self) -> None:
         """Full engine restart: stop cleanly, mark offline, then exit with a
@@ -338,10 +429,11 @@ class Engine:
         if not self.offline:
             self.dispatcher.update_anchor(time.monotonic(), dac_time)
 
-        # Only advance the clock if we're still playing. If stop() ran
-        # mid-block it rewound position_frame to 0 — don't clobber the
-        # rewind with this block's end position (realtime race guard).
-        if t.playing:
+        # Only advance the clock if we're still playing. If stop()/seek()
+        # ran mid-block they moved position_frame away from this block's
+        # start — don't clobber that with the block's end position
+        # (realtime race guard).
+        if t.playing and t.position_frame == pos:
             t.position_frame = end
             if end >= song.frames:
                 self._on_song_end(pos, end, dac_time)
@@ -375,6 +467,8 @@ class Engine:
         # flush any events exactly at the end boundary
         self._dispatch_range(pos, song.frames + 1, dac_time)
         self.transport.position_frame = song.frames
+        # a song that ran to its natural end drops any pending seek
+        self.transport.clear_seek()
         self.transport.stop()
         log.info("song '%s' finished", song.name if song else "?")
         if self.offline:
@@ -402,14 +496,25 @@ class Engine:
         """Open the audio streams; tolerate missing/broken devices."""
         try:
             self.backend.start(self._plans, self.sr, self.block_size)
-            self._streams_healthy = True
-            return True
         except Exception as exc:
             # expected while no output device is connected — single line,
             # no traceback spam on every retry
             log.warning("could not open audio streams (%s)", exc)
             self._streams_healthy = False
             return False
+        missing = devices.missing_audio_devices(self._routing_cfg,
+                                                self._dev_snapshot)
+        if missing:
+            # streams ARE open, but on the fallback device — keep the
+            # recovery cycle running until the configured interface
+            # (re)appears (hot-plug persistence)
+            log.warning("audio streams opened on fallback; configured "
+                        "device(s) missing: %s — will keep re-enumerating",
+                        ", ".join(missing))
+            self._streams_healthy = False
+        else:
+            self._streams_healthy = True
+        return True
 
     def _recovery_cooldown(self, force: bool) -> float:
         if force:
@@ -436,8 +541,15 @@ class Engine:
 
         def do():
             try:
+                # Release the current streams BEFORE probing: a fallback
+                # stream on ALSA 'default' can itself hold the missing USB
+                # interface open, which hides it from PortAudio's
+                # enumeration (device reports 0 output channels) — a
+                # self-masking lock that would never re-attach.
                 self.backend.stop()
                 self._dev_snapshot = devices.snapshot()
+                missing = devices.missing_audio_devices(self._routing_cfg,
+                                                        self._dev_snapshot)
                 song = self.transport.song
                 if song is not None and song.open:
                     self._plans = self.build_plans(song)
@@ -447,8 +559,18 @@ class Engine:
                                    device=None, n_out=8, routes=[], is_master=True)
                     ]
                 if self._start_streams():
-                    self._recovery_failures = 0
-                    log.info("audio recovery complete: %d plan(s)", len(self._plans))
+                    if missing:
+                        # reopened on the fallback; back off between probes
+                        # so the fallback isn't torn down every 5 s forever
+                        self._recovery_failures += 1
+                        self._streams_healthy = False
+                        log.info("audio recovery: configured device(s) still "
+                                 "missing (%s) — fallback stream restored, "
+                                 "will keep retrying", ", ".join(missing))
+                    else:
+                        self._recovery_failures = 0
+                        log.info("audio recovery complete: %d plan(s)",
+                                 len(self._plans))
                 else:
                     self._recovery_failures += 1
                     log.warning("audio recovery: no usable output device yet "
@@ -479,6 +601,7 @@ class Engine:
     def _snapshot(self) -> dict:
         t = self.transport
         song = t.song
+        seek_sec = t.seek_sec()
         return {
             # display name = the setlist JSON's "name" field (same as the
             # old rig showed on the OLED/dashboard); filename key stays
@@ -492,6 +615,8 @@ class Engine:
             "state": t.state,
             "positionSec": round(t.position_sec(), 3),
             "durationSec": round(t.duration_sec(), 3),
+            "seekSec": round(seek_sec, 3) if seek_sec is not None else None,
+            "cueError": self._cue_error,
             "songIndex": self.song_index,
             "songCount": len(self.setlist["songs"]) if self.setlist else 0,
             "engineOnline": True,
@@ -506,13 +631,25 @@ class Engine:
             snap["songName"] or "—",
             "PLAYING" if snap["playing"] else ("STOP" if snap["state"] == STOPPED else "CUED"),
             snap["tuning"] or "—",
+            snap["positionSec"],
+            snap["durationSec"],
         )
 
     def _on_transport_change(self) -> None:
         self._publish_state()
 
     def _heartbeat_loop(self) -> None:
-        while not self._heartbeat_stop.wait(5.0):
+        tick = 0
+        while not self._heartbeat_stop.wait(1.0):
+            tick += 1
+            # While playing, refresh position once a second so the web
+            # trackbar and the OLED time stay live between state changes.
+            if self.transport.playing:
+                self._publish_state()
+            if tick % 5 != 0:
+                continue
+            # pick up setlist edits made outside the engine
+            self._watch_setlist()
             write_state(self._snapshot())
             self.osc.oled_heartbeat(True, self.transport.playing)
             # keep the device snapshot fresh for the routing UI
@@ -539,6 +676,10 @@ class Engine:
         self.osc.on("/backtrack/stop", lambda *a: self.stop())
         self.osc.on("/backtrack/next", lambda *a: self.next_song())
         self.osc.on("/backtrack/prev", lambda *a: self.prev_song())
+        self.osc.on("/backtrack/seek",
+                    lambda addr, *args: self.seek(float(args[0]) if args else 0.0))
+        self.osc.on("/backtrack/seek_by",
+                    lambda addr, *args: self.seek_by(float(args[0]) if args else 0.0))
         self.osc.on("/backtrack/load",
                     lambda addr, *args: self.load_setlist(str(args[0]) if args else ""))
         self.osc.on("/midi/reload", lambda *a: self.mapper.reload())
@@ -556,8 +697,23 @@ class Engine:
     # lifecycle
     # ------------------------------------------------------------------
 
+    def _purge_media_cache(self) -> None:
+        """Delete stale decoded-AAC spool files left over from previous
+        runs (e.g. after an unclean shutdown)."""
+        try:
+            for name in os.listdir(paths.CACHE_DIR):
+                p = paths.CACHE_DIR / name
+                if p.is_file():
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
     def start(self) -> None:
         paths.ensure_dirs()
+        self._purge_media_cache()
         self._plans: List[DevicePlan] = [
             DevicePlan(key="default", name="default output", n_out=8, routes=[], is_master=True)
         ]

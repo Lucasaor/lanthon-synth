@@ -1,32 +1,44 @@
-"""Song model: one multichannel WAV + one companion MIDI file.
+"""Song model: one multichannel audio file + one companion MIDI file.
 
-The WAV is a single pre-rendered interleaved multichannel file. Canonical
-channel layout (also the default routing, see config/audio_routing.json):
+Audio comes as a single pre-rendered interleaved multichannel file.
+Canonical channel layout (also the default routing, see
+config/audio_routing.json):
 
-    ch 1 — Playback L
-    ch 2 — Playback R
+    ch 1 — Playback L (VS)
+    ch 2 — Playback R (VS)
     ch 3 — Click
     ch 4 — Cue
     ch 5 — Timecode (optional, if present in the render)
 
-Audio is streamed from disk (never loaded into RAM) via soundfile's
-sequential block reads. The MIDI file is pre-parsed once into a sorted
-list of (frame, message) pairs (see smf.py) — flat memory regardless of
-song length.
+Both PCM WAV and compressed AAC/M4A sources are accepted: M4A is decoded
+to a temporary cached WAV with ffmpeg at cue time (kept only while the
+song is open), so audio stays streamed block-by-block from disk and seek
+keeps working without loading the whole song into RAM.
+
+The MIDI file is pre-parsed once into a sorted list of (frame, message)
+pairs (see smf.py) — flat memory regardless of song length.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import List, Optional
 
 import numpy as np
 import soundfile as sf
 
+from .paths import CACHE_DIR
 from .smf import Smf, parse_smf_file
 
 log = logging.getLogger("engine.song")
+
+# containers libsndfile cannot read — decoded via ffmpeg into the cache
+AAC_EXTS = {".m4a", ".mp4", ".aac", ".m4b"}
 
 WAV_CHANNELS = {
     "playback_l": 0,
@@ -50,6 +62,7 @@ class Song:
 
     # runtime state (opened on cue)
     _sf: Optional[sf.SoundFile] = None
+    _cache_wav: Optional[str] = None  # decoded-AAC spool, deleted on close
     smf: Optional[Smf] = None
     nchannels: int = 0
     frames: int = 0
@@ -59,14 +72,63 @@ class Song:
     def open(self) -> bool:
         return self._sf is not None
 
+    def _decode_to_cache(self, src: str) -> str:
+        """Decode a compressed source (m4a/aac/mp4) to a cached PCM WAV.
+
+        The cache lives only while the song is open — close() deletes it —
+        so disk usage stays small (just the currently cued song(s)).
+        """
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise ValueError(
+                f"{src}: ffmpeg not found — cannot decode compressed audio")
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        fd, out_path = tempfile.mkstemp(suffix=".wav", dir=CACHE_DIR)
+        os.close(fd)
+        cmd = [ffmpeg, "-y", "-v", "error", "-i", src,
+               "-c:a", "pcm_s16le", out_path]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=900)
+        except subprocess.TimeoutExpired:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+            raise ValueError(f"{src}: ffmpeg decode timed out")
+        if proc.returncode != 0 or not os.path.exists(out_path) \
+                or os.path.getsize(out_path) <= 44:
+            err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+            raise ValueError(
+                f"{src}: ffmpeg could not decode"
+                + (f": {err[-300:]}" if err else ""))
+        log.info("decoded '%s' → cached WAV (%d kB)",
+                 os.path.basename(src), os.path.getsize(out_path) // 1024)
+        return out_path
+
     def cue(self) -> None:
-        """Open the WAV handle and parse the MIDI file (background-safe)."""
+        """Open the audio handle and parse the MIDI file (background-safe)."""
         if self.open:
             return
-        self._sf = sf.SoundFile(self.wav_path)
+        path = self.wav_path
+        if os.path.splitext(path)[1].lower() in AAC_EXTS:
+            self._cache_wav = self._decode_to_cache(path)
+            path = self._cache_wav
+        try:
+            self._sf = sf.SoundFile(path)
+        except Exception:
+            self._discard_cache()
+            raise
         if self._sf.samplerate != self.sample_rate:
+            actual = self._sf.samplerate
+            self._sf.close()
+            self._sf = None
+            self._discard_cache()
             raise ValueError(
-                f"{self.wav_path}: sample rate {self._sf.samplerate} != "
+                f"{self.wav_path}: sample rate {actual} != "
                 f"engine rate {self.sample_rate}"
             )
         self.nchannels = self._sf.channels
@@ -81,6 +143,14 @@ class Song:
         log.info("Cued song '%s': %d ch, %.1f s, %d MIDI events",
                  self.name, self.nchannels, self.duration_sec,
                  len(self.smf.events) if self.smf else 0)
+
+    def _discard_cache(self) -> None:
+        if self._cache_wav:
+            try:
+                os.unlink(self._cache_wav)
+            except OSError:
+                pass
+            self._cache_wav = None
 
     def read_block(self, pos: int, n: int) -> np.ndarray:
         """Read n frames starting at pos. Zero-pads past EOF.
@@ -101,6 +171,7 @@ class Song:
         if self._sf is not None:
             self._sf.close()
         self._sf = None
+        self._discard_cache()
 
     @property
     def has_timecode(self) -> bool:

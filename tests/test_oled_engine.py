@@ -69,6 +69,8 @@ def daemon_state():
             oled_daemon._state.playback_state,
             oled_daemon._state.tuning,
             oled_daemon._state.sc_online,
+            oled_daemon._state.position_sec,
+            oled_daemon._state.duration_sec,
         )
 
 
@@ -128,6 +130,9 @@ class TestOledEngine(unittest.TestCase):
 
     def test_oled_tracks_engine_across_transport(self):
         engine = self.engine
+        # clear any song left cued by an earlier test so _wait_cued below
+        # has to wait for a genuinely fresh cue
+        engine.transport.set_song(None)
         engine.load_setlist("oled")
         self._wait_cued(0)
 
@@ -159,6 +164,19 @@ class TestOledEngine(unittest.TestCase):
         self._wait_cued(0)
         wait_for(lambda: daemon_state()[2] == "Sober", what="prev song on OLED")
         self.assertEqual(daemon_state()[4], "Drop D")
+
+    def test_oled_shows_position_and_duration(self):
+        engine = self.engine
+        engine.load_setlist("oled")
+        self._wait_cued(0)
+        # fixture song is 2.0 s long; duration arrives with the cue update
+        wait_for(lambda: daemon_state()[7] == 2.0, what="duration on OLED")
+        self.assertEqual(daemon_state()[6], 0.0)
+        # seeking publishes the new position to the OLED
+        engine.seek(1.0)
+        wait_for(lambda: abs(daemon_state()[6] - 1.0) < 1e-6,
+                 what="seek position on OLED")
+        self.assertEqual(daemon_state()[3], "CUED")
 
     def test_oled_heartbeat_marks_engine_online(self):
         self.engine.osc.oled_heartbeat(True, False)

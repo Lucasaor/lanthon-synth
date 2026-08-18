@@ -15,6 +15,7 @@ _PROJECT_ROOT = Path(
 CONFIG_DIR = _PROJECT_ROOT / "config"
 SETLISTS_DIR = _PROJECT_ROOT / "setlists"
 MEDIA_DIR = _PROJECT_ROOT / "media"
+CACHE_DIR = MEDIA_DIR / ".cache"   # decoded-AAC spool (m4a → WAV, per cue)
 STATE_FILE = CONFIG_DIR / "state.json"
 MIDI_MAP_FILE = CONFIG_DIR / "midi_map.json"
 ROUTING_FILE = CONFIG_DIR / "audio_routing.json"
@@ -24,5 +25,5 @@ MIDI_LEARN_FILE = CONFIG_DIR / "midi_learn.json"
 
 
 def ensure_dirs() -> None:
-    for d in (CONFIG_DIR, SETLISTS_DIR, MEDIA_DIR):
+    for d in (CONFIG_DIR, SETLISTS_DIR, MEDIA_DIR, CACHE_DIR):
         d.mkdir(parents=True, exist_ok=True)

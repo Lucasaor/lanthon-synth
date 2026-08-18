@@ -7,12 +7,17 @@ realtime backend, with deterministic results.
 Run:  python3 tests/test_engine.py
 """
 
+import json
 import math
 import os
 import resource
+import shutil
 import struct
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import wave
 
@@ -252,6 +257,439 @@ class TestMemory(Fixtures):
             time.sleep(0.01)
         raise AssertionError(f"song {idx} never cued (song_index="
                              f"{engine.song_index})")
+
+
+class TestSeek(Fixtures):
+    def test_seek_and_stop_semantics(self):
+        """Seek survives stop() → play(); a second stop clears it."""
+        engine = self.make_engine()
+        engine.start()
+        self.load_song(engine)
+        t = engine.transport
+        engine.play()
+        for _ in range(5):
+            engine.tick(BLOCK, _Ti(0.0), None)
+        self.assertGreater(t.position_frame, 0)
+
+        engine.seek(1.5)
+        self.assertEqual(t.position_frame, int(1.5 * SR))
+        self.assertEqual(t.seek_sec(), 1.5)
+
+        # rendering continues from the seek position
+        engine.tick(BLOCK, _Ti(0.0), None)
+        self.assertEqual(t.position_frame, int(1.5 * SR) + BLOCK)
+
+        # stop with a seek defined → next play resumes from the seek time
+        engine.stop()
+        self.assertFalse(t.playing)
+        self.assertEqual(t.position_frame, int(1.5 * SR))
+        engine.play()
+        self.assertTrue(t.playing)
+        self.assertEqual(t.position_frame, int(1.5 * SR))
+
+        # stopping from playing keeps the seek position...
+        engine.stop()
+        self.assertFalse(t.playing)
+        self.assertEqual(t.position_frame, int(1.5 * SR))
+        # ...but a second stop while already stopped clears it
+        engine.stop()
+        self.assertFalse(t.playing)
+        self.assertIsNone(t.seek_sec())
+        self.assertEqual(t.position_frame, 0)
+        engine.play()
+        self.assertTrue(t.playing)
+        self.assertEqual(t.position_frame, 0)
+        engine.shutdown()
+
+    def test_seek_recomputes_midi_dispatch(self):
+        """After a seek, only events at/after the new position fire."""
+        engine = self.make_engine()
+        engine.start()
+        self.load_song(engine)
+        engine.play()
+        # 4.0 s: past the 0.5 s PC and 3.0 s CC, before the 5.5 s note
+        engine.seek(4.0)
+        self.assertEqual(engine._next_event_idx, 2)
+        engine.run_offline_until_stop()
+        recorded = engine.dispatcher.recorded
+        self.assertEqual(len(recorded), 2,
+                         f"expected only post-seek events, got "
+                         f"{[(f, list(m)) for f, m in recorded]}")
+        for (frame, msg), exp_f, exp_m in zip(
+                recorded, self.expected_frames[2:], self.expected_msgs[2:]):
+            self.assertEqual(frame, exp_f, "MIDI event frame mismatch after seek")
+            self.assertEqual(msg, exp_m)
+        engine.shutdown()
+
+    def test_seek_while_stopped_and_clamping(self):
+        engine = self.make_engine()
+        engine.start()
+        self.load_song(engine)
+        t = engine.transport
+        # seek before ever playing: position set, transport stays cued
+        engine.seek(2.0)
+        self.assertEqual(t.position_frame, int(2.0 * SR))
+        self.assertEqual(t.seek_sec(), 2.0)
+        # clamp to song bounds (fixture is 10 s long)
+        engine.seek(999.0)
+        self.assertEqual(t.position_frame, self.nframes)
+        engine.seek(-5.0)
+        self.assertEqual(t.position_frame, 0)
+        engine.seek(2.0)
+        engine.play()
+        self.assertTrue(t.playing)
+        self.assertEqual(t.position_frame, int(2.0 * SR))
+        # natural song end clears any pending seek
+        engine.run_offline_until_stop()
+        self.assertIsNone(t.seek_sec())
+        self.assertEqual(t.position_frame, 0)
+        engine.shutdown()
+
+
+class TestDevicePersistence(Fixtures):
+    """A missing configured interface must NOT be masked by a working
+    fallback stream — the engine stays unhealthy, keeps re-enumerating,
+    and re-attaches when the interface (re)appears."""
+
+    MOCK_ABSENT = json.dumps({
+        "audio": [{"key": "audio:0", "name": "default", "index": 0,
+                    "max_out_channels": 2}],
+        "midi_out": [{"key": "midi_out:0", "name": "Midi Through", "index": 0}],
+        "midi_in": [],
+    })
+    MOCK_PRESENT = json.dumps({
+        "audio": [{"key": "audio:0", "name": "CS202: USB Audio (hw:0,0)",
+                    "index": 0, "max_out_channels": 2}],
+        "midi_out": [{"key": "midi_out:0", "name": "Midi Through", "index": 0}],
+        "midi_in": [],
+    })
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()  # Fixtures: WAV/MIDI fixtures + env pop
+        cfg_dir = str(paths.CONFIG_DIR)
+        os.makedirs(cfg_dir, exist_ok=True)
+        with open(os.path.join(cfg_dir, "audio_routing.json"), "w") as f:
+            json.dump({"tracks": {
+                "playback_l": {"device": "CS202: USB Audio (hw:0,0)", "channel": 1},
+                "playback_r": {"device": "CS202: USB Audio (hw:0,0)", "channel": 2},
+            }}, f)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            os.remove(os.path.join(str(paths.CONFIG_DIR), "audio_routing.json"))
+        except FileNotFoundError:
+            pass
+        super().tearDownClass()
+
+    def setUp(self):
+        self._prev = os.environ.get("LANTH0N_DEVICES_JSON")
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("LANTH0N_DEVICES_JSON", None)
+        else:
+            os.environ["LANTH0N_DEVICES_JSON"] = self._prev
+
+    def test_fallback_stream_stays_unhealthy_until_device_appears(self):
+        os.environ["LANTH0N_DEVICES_JSON"] = self.MOCK_ABSENT
+        engine = self.make_engine()
+        engine.start()
+        # streams open (offline backend) but the configured device is
+        # absent → the engine must NOT consider itself healthy
+        self.assertFalse(engine._streams_healthy,
+                         "fallback stream masked the missing interface")
+        self.load_song(engine)
+        self.assertFalse(engine._streams_healthy)
+
+        # the interface appears → applying routing re-attaches to it
+        os.environ["LANTH0N_DEVICES_JSON"] = self.MOCK_PRESENT
+        engine.apply_routing()
+        self.assertTrue(engine._streams_healthy)
+        self.assertTrue(any("CS202" in p.name for p in engine._plans),
+                        f"plans: {[p.name for p in engine._plans]}")
+        engine.shutdown()
+
+    def test_apply_routing_rebuilds_after_device_swap(self):
+        os.environ["LANTH0N_DEVICES_JSON"] = self.MOCK_PRESENT
+        engine = self.make_engine()
+        engine.start()
+        self.load_song(engine)
+        self.assertTrue(engine._streams_healthy)
+        self.assertTrue(any("CS202" in p.name for p in engine._plans))
+
+        # device drops off the bus
+        os.environ["LANTH0N_DEVICES_JSON"] = self.MOCK_ABSENT
+        engine.apply_routing()
+        self.assertFalse(engine._streams_healthy)
+        self.assertTrue(any(p.device is None for p in engine._plans))
+        engine.shutdown()
+
+
+class TestOscRobustness(Fixtures):
+    def test_malformed_osc_does_not_kill_server(self):
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+
+        engine = Engine(offline=True, sample_rate=SR, block_size=BLOCK,
+                        midi_in_enabled=False, osc_port=port)
+        engine.start()
+        t = threading.Thread(target=engine.serve_forever, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        self.assertTrue(t.is_alive())
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # garbage bytes + an OSC message with a boolean type tag
+        # (python-osc cannot decode T/F — must not take the server down)
+        sock.sendto(b"\x00\x01\x02\x03not-osc-at-all", ("127.0.0.1", port))
+        sock.sendto(b"/x\x00\x00" + b",T\x00\x00" + b"\x01\x00\x00\x00",
+                    ("127.0.0.1", port))
+        time.sleep(0.3)
+        self.assertTrue(t.is_alive(), "OSC server died on malformed datagram")
+
+        # a valid message is still served afterwards
+        from pythonosc.udp_client import SimpleUDPClient
+
+        client = SimpleUDPClient("127.0.0.1", port)
+        client.send_message("/backtrack/play", [])
+        time.sleep(0.3)
+        self.assertTrue(engine.transport.pending_play,
+                        "play latch not set — server no longer handling messages")
+        sock.close()
+        engine.shutdown()
+
+
+class TestSetlistHotReload(Fixtures):
+    """Edits to the active setlist file must be picked up automatically
+    (the user edits on disk / web UI → engine reloads without a manual
+    'Load to Rig')."""
+
+    def setUp(self):
+        import shutil
+
+        media = str(paths.MEDIA_DIR)
+        os.makedirs(media, exist_ok=True)
+        shutil.copy(self.wav_path, os.path.join(media, "hot.wav"))
+        shutil.copy(self.mid_path, os.path.join(media, "hot.mid"))
+        self.sl = os.path.join(str(paths.SETLISTS_DIR), "hot.json")
+        os.makedirs(os.path.dirname(self.sl), exist_ok=True)
+        self._write(("A", "B"))
+
+    def _write(self, names):
+        with open(self.sl, "w") as f:
+            json.dump({"name": "hot", "songs": [
+                {"name": n, "artist": "", "tuning": "standard", "key": "E",
+                 "wav": "hot.wav", "mid": "hot.mid"}
+                for n in names
+            ]}, f)
+
+    def _engine(self):
+        engine = self.make_engine()
+        engine.start()
+        engine.load_setlist("hot")
+        self.assertTrue(engine.wait_cued())
+        return engine
+
+    def test_watch_reloads_edited_setlist(self):
+        engine = self._engine()
+        self.assertEqual(len(engine.setlist["songs"]), 2)
+        self._write(("A",))           # user removes a song
+        engine._watch_setlist()
+        self.assertEqual(len(engine.setlist["songs"]), 1)
+        self.assertEqual(engine.song_index, 0)
+        self.assertEqual(engine.transport.song.name, "A")
+        engine.shutdown()
+
+    def test_watch_noop_when_unchanged(self):
+        engine = self._engine()
+        before = [s.name for s in engine.setlist["songs"]]
+        engine._watch_setlist()
+        self.assertEqual([s.name for s in engine.setlist["songs"]], before)
+        engine.shutdown()
+
+    def test_watch_autoplays_when_playing(self):
+        engine = self._engine()
+        engine.play()
+        self.assertTrue(engine.transport.playing)
+        self._write(("B",))           # replace song list while playing
+        engine._watch_setlist()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if (engine.transport.playing
+                    and engine.transport.song is not None
+                    and engine.transport.song.name == "B"):
+                break
+            time.sleep(0.02)
+        else:
+            self.fail("hot-reload did not resume playback of the new song")
+        engine.shutdown()
+
+    def test_watch_keeps_list_when_file_deleted(self):
+        engine = self._engine()
+        os.remove(self.sl)
+        engine._watch_setlist()
+        self.assertEqual(len(engine.setlist["songs"]), 2,
+                         "in-memory setlist must survive file deletion")
+        engine.shutdown()
+
+
+class TestCueError(Fixtures):
+    def test_cue_failure_surfaces_in_state(self):
+        media = str(paths.MEDIA_DIR)
+        os.makedirs(media, exist_ok=True)
+        with open(os.path.join(media, "broken.wav"), "w"):
+            pass  # 0-byte file
+        sl = os.path.join(str(paths.SETLISTS_DIR), "broken.json")
+        os.makedirs(os.path.dirname(sl), exist_ok=True)
+        with open(sl, "w") as f:
+            json.dump({"name": "broken", "songs": [
+                {"name": "Broken", "artist": "", "tuning": "standard", "key": "E",
+                 "wav": "broken.wav", "mid": ""}]}, f)
+
+        engine = self.make_engine()
+        engine.start()
+        engine.load_setlist("broken")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and engine._cue_error is None:
+            time.sleep(0.02)
+        self.assertIsNotNone(engine._cue_error, "cue failure not recorded")
+        self.assertIn("broken.wav", engine._cue_error)
+        with open(paths.STATE_FILE) as f:
+            st = json.load(f)
+        self.assertTrue(st.get("cueError"), "cueError missing from state.json")
+        engine.shutdown()
+
+    def test_failed_cue_clears_stale_song(self):
+        media = str(paths.MEDIA_DIR)
+        os.makedirs(media, exist_ok=True)
+        shutil.copy(self.wav_path, os.path.join(media, "good.wav"))
+        good = os.path.join(str(paths.SETLISTS_DIR), "good.json")
+        os.makedirs(os.path.dirname(good), exist_ok=True)
+        with open(good, "w") as f:
+            json.dump({"name": "good", "songs": [
+                {"name": "Good", "artist": "", "tuning": "standard", "key": "E",
+                 "wav": "good.wav", "mid": ""}]}, f)
+
+        engine = self.make_engine()
+        engine.start()
+        engine.load_setlist("good")
+        self.assertTrue(engine.wait_cued())
+        self.assertIsNotNone(engine.transport.song)
+
+        # a new setlist whose only song cannot be cued
+        with open(os.path.join(media, "broken.wav"), "w"):
+            pass
+        bad = os.path.join(str(paths.SETLISTS_DIR), "bad.json")
+        with open(bad, "w") as f:
+            json.dump({"name": "bad", "songs": [
+                {"name": "Broken", "artist": "", "tuning": "standard", "key": "E",
+                 "wav": "broken.wav", "mid": ""}]}, f)
+        engine.load_setlist("bad")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and engine._cue_error is None:
+            time.sleep(0.02)
+        self.assertIsNotNone(engine._cue_error)
+        self.assertIsNone(engine.transport.song,
+                          "stale song from the previous setlist still cued")
+        engine.shutdown()
+
+
+class TestMediaCache(Fixtures):
+    def test_startup_purges_decoded_cache(self):
+        os.makedirs(paths.CACHE_DIR, exist_ok=True)
+        junk = paths.CACHE_DIR / "stale.wav"
+        junk.write_bytes(b"junk")
+        engine = self.make_engine()
+        engine.start()
+        self.assertFalse(junk.exists(), "stale decoded cache not purged")
+        engine.shutdown()
+
+
+class TestM4aDecode(Fixtures):
+    """Compressed M4A/AAC sources: decoded to a cached WAV at cue time,
+    streamed + seekable, cache removed when the song closes."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.ffmpeg = shutil.which("ffmpeg")
+
+    def _make_m4a(self, out):
+        subprocess.run(
+            [self.ffmpeg, "-y", "-v", "error", "-i", self.wav_path,
+             "-c:a", "aac", "-b:a", "192k", out],
+            check=True)
+
+    def test_m4a_cue_read_seek_and_cache_cleanup(self):
+        if not self.ffmpeg:
+            raise unittest.SkipTest("ffmpeg not available")
+        m4a = os.path.join(self.dir, "test-song.m4a")
+        self._make_m4a(m4a)
+
+        song = Song(name="M4A Song", artist="", tuning="standard", key="E",
+                    wav_path=m4a, mid_path=None, sample_rate=SR)
+        song.cue()
+        try:
+            self.assertTrue(song.open)
+            self.assertEqual(song.nchannels, 4)
+            # AAC priming adds a little padding — allow < 1 s of slack
+            self.assertLess(abs(song.frames - self.nframes), SR)
+            cache = song._cache_wav
+            self.assertTrue(cache and os.path.exists(cache),
+                            "decoded cache WAV missing")
+
+            blk = song.read_block(0, SR)
+            self.assertEqual(blk.shape, (SR, 4))
+            # channels 1-2 (VS tones) and 3 (click) must carry signal
+            self.assertGreater(np.abs(blk[:, 0]).mean(), 1e-3, "VS L silent")
+            self.assertGreater(np.abs(blk[:, 1]).mean(), 1e-3, "VS R silent")
+            self.assertGreater(np.abs(blk[:, 2]).mean(), 1e-3, "click silent")
+
+            # seek: the middle of the song differs from the start
+            mid = song.read_block(5 * SR, 1000)
+            self.assertFalse(np.allclose(blk[:1000], mid, atol=1e-3))
+        finally:
+            song.close()
+        self.assertFalse(os.path.exists(cache), "cache WAV not cleaned up")
+
+    def test_engine_plays_m4a_offline(self):
+        if not self.ffmpeg:
+            raise unittest.SkipTest("ffmpeg not available")
+        m4a = os.path.join(self.dir, "test-song.m4a")
+        self._make_m4a(m4a)
+
+        engine = self.make_engine()
+        engine.start()
+        self.load_song(engine, wav_path=m4a)
+        engine.backend.record = True
+        engine.play()
+        engine.run_offline_until_stop()
+        out = np.vstack(engine.backend.buffers["default"])
+        self.assertGreater(np.abs(out[:, 0]).mean(), 1e-3,
+                           "rendered VS channel is silent")
+        # companion MIDI automation still dispatches frame-exact
+        self.assertEqual(len(engine.dispatcher.recorded),
+                         len(self.expected_frames))
+        engine.shutdown()
+
+    def test_m4a_decode_failure_surfaces(self):
+        if not self.ffmpeg:
+            raise unittest.SkipTest("ffmpeg not available")
+        bad = os.path.join(self.dir, "garbage.m4a")
+        with open(bad, "w") as f:
+            f.write("this is not audio at all")
+        song = Song(name="Bad", artist="", tuning="standard", key="E",
+                    wav_path=bad, mid_path=None, sample_rate=SR)
+        with self.assertRaises(Exception):
+            song.cue()
+        self.assertFalse(song.open)
+        song.close()
 
 
 class _Ti:
