@@ -26,7 +26,8 @@ import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 import numpy as np
@@ -49,7 +50,10 @@ WAV_CHANNELS = {
 }
 
 
-@dataclass
+# eq=False: songs are compared/hashed by identity only — runtime state
+# (open handle, decoded cache) must never participate in equality, and the
+# engine keeps songs in sets (pre-cue tracking). All comparisons use `is`.
+@dataclass(eq=False)
 class Song:
     name: str
     artist: str
@@ -67,6 +71,10 @@ class Song:
     nchannels: int = 0
     frames: int = 0
     duration_sec: float = 0.0
+    # serializes cue()/close(): the engine pre-cues adjacent songs in the
+    # background while a user-triggered switch may cue the same song
+    _lock: object = field(default_factory=threading.Lock, repr=False,
+                          compare=False)
 
     @property
     def open(self) -> bool:
@@ -110,9 +118,19 @@ class Song:
         return out_path
 
     def cue(self) -> None:
-        """Open the audio handle and parse the MIDI file (background-safe)."""
-        if self.open:
-            return
+        """Open the audio handle and parse the MIDI file (background-safe).
+
+        Thread-safe: if a pre-cue task is already decoding this song,
+        concurrent callers wait for that decode instead of starting a
+        second one (the open-check happens again under the lock).
+        """
+        with self._lock:
+            if self.open:
+                return
+            self._cue_unlocked()
+
+    def _cue_unlocked(self) -> None:
+        """Open audio + MIDI; caller must hold self._lock."""
         path = self.wav_path
         if os.path.splitext(path)[1].lower() in AAC_EXTS:
             self._cache_wav = self._decode_to_cache(path)
@@ -168,10 +186,11 @@ class Song:
         return data
 
     def close(self) -> None:
-        if self._sf is not None:
-            self._sf.close()
-        self._sf = None
-        self._discard_cache()
+        with self._lock:
+            if self._sf is not None:
+                self._sf.close()
+            self._sf = None
+            self._discard_cache()
 
     @property
     def has_timecode(self) -> bool:

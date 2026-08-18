@@ -259,6 +259,88 @@ class TestMemory(Fixtures):
                              f"{engine.song_index})")
 
 
+class TestPrecue(Fixtures):
+    """Background pre-cue: the adjacent songs are cued before next/prev is
+    pressed, so switches are instant instead of waiting for a full decode."""
+
+    def _make_engine(self, n=3):
+        songs = []
+        for i in range(n):
+            songs.append({
+                "name": f"Song {i}", "artist": "", "tuning": "standard",
+                "key": "E", "wav": os.path.basename(self.wav_path),
+                "mid": os.path.basename(self.mid_path),
+            })
+        setlist_file = os.path.join(str(paths.SETLISTS_DIR), "precue.json")
+        os.makedirs(os.path.dirname(setlist_file), exist_ok=True)
+        with open(setlist_file, "w") as f:
+            json.dump({"name": "precue", "songs": songs}, f)
+        media = str(paths.MEDIA_DIR)
+        os.makedirs(media, exist_ok=True)
+        shutil.copy(self.wav_path, media)
+        shutil.copy(self.mid_path, media)
+        engine = self.make_engine()
+        engine.start()
+        return engine
+
+    @staticmethod
+    def _wait_for(fn, what, timeout=10.0):
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < timeout:
+            if fn():
+                return
+            time.sleep(0.01)
+        raise AssertionError(f"timed out waiting for {what}")
+
+    def test_precue_opens_neighbors_before_switch(self):
+        engine = self._make_engine(3)
+        try:
+            engine.load_setlist("precue")
+            self._wait_for(lambda: engine.transport.song is not None
+                           and engine.transport.song.open
+                           and engine.song_index == 0, "song 0 cued")
+            songs = engine.setlist["songs"]
+            self._wait_for(lambda: songs[1].open, "song 1 pre-cued")
+            # the pre-cue must never start playback or move the transport
+            self.assertFalse(engine.transport.playing)
+            self.assertEqual(engine.transport.song, songs[0])
+            self.assertEqual(engine.transport.position_frame, 0)
+        finally:
+            engine.shutdown()
+
+    def test_switch_keeps_prev_open_and_prunes_stale(self):
+        engine = self._make_engine(3)
+        try:
+            engine.load_setlist("precue")
+            self._wait_for(lambda: engine.transport.song is not None
+                           and engine.transport.song.open
+                           and engine.song_index == 0, "song 0 cued")
+            songs = engine.setlist["songs"]
+            self._wait_for(lambda: songs[1].open, "song 1 pre-cued")
+
+            engine.next_song()
+            self._wait_for(lambda: engine.song_index == 1
+                           and engine.transport.song is songs[1]
+                           and engine.transport.song.open, "song 1 current")
+            # song 0 is now the prev neighbor: its deferred close must have
+            # been cancelled so prev is instant too. Sleep past the 500 ms
+            # close timer — do_cue itself cancels it, no round timing needed.
+            time.sleep(0.7)
+            self.assertTrue(songs[0].open,
+                            "previous song should stay open as neighbor")
+
+            engine.next_song()
+            self._wait_for(lambda: engine.song_index == 2
+                           and engine.transport.song is songs[2]
+                           and engine.transport.song.open, "song 2 current")
+            # song 0 is no longer adjacent → pruned by the pre-cue round
+            self._wait_for(lambda: not songs[0].open, "song 0 pruned")
+            self.assertTrue(songs[1].open,
+                            "song 1 stays open as prev neighbor")
+        finally:
+            engine.shutdown()
+
+
 class TestSeek(Fixtures):
     def test_seek_and_stop_semantics(self):
         """Seek survives stop() → play(); a second stop clears it."""

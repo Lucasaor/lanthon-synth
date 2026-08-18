@@ -179,3 +179,38 @@ Bulk WAVs → compressed 4-track M4A (ch1-2 VS, ch3 Click, ch4 Dica).
   `lanthon-oled` → active, heartbeat ONLINE; mock render check prints
   `PLAYING  1:54/4:22` for (114.0, 261.5); state.json dur 261.5 now shows
   on screen while stopped as `STOP 0:00/4:21`.
+
+## Instant next/prev via background pre-cue (Aug 18)
+
+- Symptom: 5-8 s between pressing next/prev and the new song starting.
+  Log timestamps: `next → song 3` 13:42:42 → `Cued song` 13:42:49.
+- Root cause: NOT a hardware limit — every setlist song is .m4a, and the
+  cue (full ffmpeg transcode on the Pi Zero) ran at press time. The
+  "pre-cue the adjacent song" design from the spec was never implemented
+  (`_goto` only cued the target when next/prev was pressed).
+- Fix (engine):
+  - `_precue_worker` (1 thread) runs `_precue_task` rounds: prune stale
+    open songs (no longer adjacent or from an old setlist), then cue
+    prev+next neighbors. Rounds fire after every successful do_cue AND
+    on the 5 s heartbeat (self-heal). Cache bounded to current + 2
+    neighbors; prune never closes the transport's current song or a
+    queued switch target (`_inflight_songs`).
+  - `Song.cue()/close()` serialized per song via `_lock`
+    (`@dataclass(eq=False)` so songs are identity-hashed for the sets).
+  - `Transport.set_song()` deferred close is now cancelable
+    (`cancel_pending_close`); `do_cue` cancels it for the just-left song
+    when it's still a neighbor — a busy pre-cue worker would otherwise
+    miss the 500 ms window and force a wasteful re-decode (seen live:
+    "precue: closing 'One Step Closer'" + immediate re-cue).
+  - do_cue reuses the open PortAudio streams when the new song's plans
+    equal the current ones (`new_plans != self._plans` gate; logs
+    "plans unchanged — reusing open streams").
+- Tests: `TestPrecue` (2) in test_engine.py: neighbors opened before a
+  switch without touching the transport; prev stays open past the 500 ms
+  close timer and stale songs are pruned after moving 2 away. Full suite
+  9/9 modules PASS.
+- Live verification (Pi): pre-cue log flow (pre-cue 'One Step Closer'
+  decodes while 'Take a Look Around' cued); OSC-timed switches
+  **next 21-42 ms, prev 21-22 ms** (was 5-8 s); quick next→prev leaves
+  One Step open (no re-decode), Remedy pruned after its decode; cache
+  holds exactly 2 decoded WAVs; ~52 GB free on the SD card.

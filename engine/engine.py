@@ -94,6 +94,12 @@ class Engine:
         self._setlist_stat: Optional[tuple] = None  # (mtime_ns, size) watch
         self._cue_error: Optional[str] = None       # surfaced to the web UI
         self._cue_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cue")
+        # pre-cues the songs adjacent to the current one so next/prev
+        # switches are instant (M4A transcode happens ahead of time)
+        self._precue_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="precue")
+        self._precued: set = set()        # songs held open by the pre-cue
+        self._inflight_songs: set = set() # songs a queued do_cue is switching to
+        self._inflight_lock = threading.Lock()
         self._stop_offline = False
 
         # OSC control (web UI + external tools)
@@ -266,37 +272,126 @@ class Engine:
             self._publish_state()
             return
         self.song_index = index
+        with self._inflight_lock:
+            self._inflight_songs.add(song)
 
         def do_cue():
             try:
-                song.cue()
-            except Exception as exc:
-                log.error("failed to cue '%s': %s", song.name, exc)
-                self._cue_error = f"could not load '{song.name}': {exc}"
-                if self.transport.song is not song:
-                    # the transport still holds a song from a previous
-                    # setlist context — don't leave it playable under
-                    # the new setlist (stale song + stale cache)
-                    self.transport.set_song(None)
-                song.close()
+                try:
+                    song.cue()
+                except Exception as exc:
+                    log.error("failed to cue '%s': %s", song.name, exc)
+                    self._cue_error = f"could not load '{song.name}': {exc}"
+                    if self.transport.song is not song:
+                        # the transport still holds a song from a previous
+                        # setlist context — don't leave it playable under
+                        # the new setlist (stale song + stale cache)
+                        self.transport.set_song(None)
+                    song.close()
+                    self._publish_state()
+                    return
+                self._cue_error = None
+                new_plans = self.build_plans(song)
+                self._next_event_idx = 0
+                old = self.transport.song
+                self.transport.set_song(song)
+                # if the song we just left is still an adjacent neighbor
+                # (it always is for a 1-step next/prev), cancel its
+                # deferred close RIGHT HERE — the pre-cue round may be
+                # queued behind a long decode and miss the 500 ms window,
+                # which would force a wasteful re-decode of that song
+                songs = (self.setlist or {}).get("songs") or []
+                idx = self.song_index
+                if old is not None and old is not song and (
+                        (idx - 1 >= 0 and songs[idx - 1] is old) or
+                        (idx + 1 < len(songs) and songs[idx + 1] is old)):
+                    self.transport.cancel_pending_close(old)
+                if new_plans != self._plans:
+                    # reopen the streams for the new plans: the startup
+                    # stream was opened for the bare default plan, and this
+                    # song's plans may key/route to different devices —
+                    # without the reopen the master stream never receives
+                    # buffers (silent playback)
+                    self.backend.stop()
+                    self._plans = new_plans
+                    if not self._start_streams():
+                        log.warning("song cued but audio streams could not open")
+                else:
+                    # identical routing plan (same device+channels): keep
+                    # the open streams — the switch is then near-instant
+                    log.info("plans unchanged — reusing open streams "
+                             "(instant switch)")
+                if autoplay:
+                    self.transport.play()
                 self._publish_state()
-                return
-            self._cue_error = None
-            self._plans = self.build_plans(song)
-            self._next_event_idx = 0
-            self.transport.set_song(song)
-            # reopen the streams for the new plans: the startup stream was
-            # opened for the bare default plan, and this song's plans may
-            # key/route to different devices — without the reopen the
-            # master stream never receives buffers (silent playback)
-            self.backend.stop()
-            if not self._start_streams():
-                log.warning("song cued but audio streams could not open")
-            if autoplay:
-                self.transport.play()
-            self._publish_state()
+            finally:
+                with self._inflight_lock:
+                    self._inflight_songs.discard(song)
+                self._precue_neighbors()
 
         self._cue_worker.submit(do_cue)
+
+    # ------------------------------------------------------------------
+    # Background pre-cue (instant next/prev)
+    # ------------------------------------------------------------------
+
+    def _precue_neighbors(self) -> None:
+        """Queue a pre-cue round on the dedicated worker. Safe to call
+        from any thread; rounds coalesce on the single worker thread."""
+        self._precue_worker.submit(self._precue_task)
+
+    def _precue_task(self) -> None:
+        """One pre-cue round.
+
+        Closes songs that are no longer adjacent (frees SoundFile handles
+        and decoded-AAC cache files), then makes sure both the previous
+        and the next song are cued and held open. A press on next/prev
+        then only needs the (already open) song, so the switch is instant
+        instead of waiting out a full ffmpeg decode.
+        """
+        try:
+            songs = (self.setlist or {}).get("songs") or []
+            idx = self.song_index
+            current = self.transport.song
+            neighbors = [songs[i] for i in (idx - 1, idx + 1)
+                         if 0 <= i < len(songs)]
+            keep = set(neighbors)
+            if current is not None:
+                keep.add(current)
+            with self._inflight_lock:
+                protected = set(self._inflight_songs)
+
+            # stale pre-cues (moved away from, or from an old setlist)
+            stale = set(self._precued)
+            stale |= {s for s in songs if s.open}
+            for s in stale:
+                if s in keep or s is current or s in protected:
+                    continue
+                log.info("precue: closing '%s' (no longer adjacent)", s.name)
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            self._precued = set()
+
+            for n in neighbors:
+                if n is current or n in protected:
+                    continue
+                # the song we just switched away from is now the adjacent
+                # neighbor in the other direction — cancel its deferred
+                # close so it stays open for an instant switch back
+                self.transport.cancel_pending_close(n)
+                if n.open:
+                    self._precued.add(n)
+                    continue
+                log.info("pre-cueing '%s' in the background", n.name)
+                try:
+                    n.cue()
+                    self._precued.add(n)
+                except Exception as exc:
+                    log.warning("pre-cue failed for '%s': %s", n.name, exc)
+        except Exception:
+            log.exception("precue round failed")
 
     def next_song(self) -> None:
         if self.setlist is None:
@@ -650,6 +745,9 @@ class Engine:
                 continue
             # pick up setlist edits made outside the engine
             self._watch_setlist()
+            # keep the adjacent songs pre-cued (self-heals any missed
+            # round, e.g. when a deferred close raced a pre-cue)
+            self._precue_neighbors()
             write_state(self._snapshot())
             self.osc.oled_heartbeat(True, self.transport.playing)
             # keep the device snapshot fresh for the routing UI
@@ -810,5 +908,9 @@ class Engine:
         try:
             self._offline_pump_stop.set()
         except AttributeError:
+            pass
+        try:
+            self._precue_worker.shutdown(wait=False, cancel_futures=True)
+        except Exception:
             pass
         self.osc.stop()

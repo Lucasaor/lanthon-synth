@@ -72,8 +72,17 @@ close; cache dir purged on engine start).
 
 ## Key behaviours
 
-- Next/Prev pre-cues the adjacent song in a background worker; switching
-  **during playback auto-plays** the new song.
+- Next/Prev pre-cues the adjacent songs in the background (`_precue_worker`,
+  single-threaded; rounds also run on the 5 s heartbeat to self-heal): both
+  neighbors are decoded + opened ahead of time, so a switch is instant
+  (~20-40 ms on the Pi, was 5-8 s waiting on the ffmpeg decode). Stale
+  pre-cues (no longer adjacent) are closed, bounding the decoded cache to
+  current + 2 neighbors. `do_cue` cancels the old song's 500 ms deferred
+  close when it's still a neighbor (else a busy pre-cue worker would miss
+  the window and force a re-decode). `Song.cue()/close()` are lock-guarded
+  (pre-cue vs switch race). Switching **during playback auto-plays** the
+  new song. When the new song's routing plans equal the current ones, the
+  open PortAudio streams are reused (no reopen).
 - `play()` before the cue finishes latches (`Transport._pending_play`).
 - **Setlist hot-reload**: the 5 s heartbeat `_watch_setlist()` stats the
   active setlist file (`_setlist_stat = (mtime_ns, size)`, recorded on

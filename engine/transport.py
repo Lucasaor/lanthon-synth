@@ -44,6 +44,10 @@ class Transport:
         # until a second stop() with the transport already stopped clears it
         self._seek_frame: Optional[int] = None
         self._lock = threading.Lock()
+        # songs whose deferred close (see set_song) is still pending;
+        # the engine's pre-cue cancels it when the old song remains an
+        # adjacent neighbor (so prev/next stay instant)
+        self._pending_closes: set = set()
         # listeners: (fn, kwargs) invoked on every state change
         self._listeners: List[Callable] = []
 
@@ -77,13 +81,28 @@ class Transport:
         if old is not None and old is not self.song:
             # Deferred close: an audio callback may still be inside a C-level
             # read on the old handle; closing 500 ms later avoids the race.
+            # The close can be cancelled (cancel_pending_close) while the
+            # song is still an adjacent neighbor — then it stays open and
+            # an immediate next/prev switch needs no re-cue.
+            with self._lock:
+                self._pending_closes.add(old)
+
             def _close_later(s=old):
                 try:
+                    with self._lock:
+                        if s not in self._pending_closes:
+                            return  # cancelled — keep it open (pre-cue)
+                        self._pending_closes.discard(s)
                     s.close()
                 except Exception:
                     pass
             threading.Timer(0.5, _close_later).start()
         self._notify()
+
+    def cancel_pending_close(self, song) -> None:
+        """Cancel a deferred close so the song stays open (pre-cue reuse)."""
+        with self._lock:
+            self._pending_closes.discard(song)
 
     def play(self) -> None:
         with self._lock:
