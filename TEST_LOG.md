@@ -15,7 +15,7 @@ WAV + MIDI automation player. Evidence per build step (dev machine,
 | `test_engine.py` | sync, routing, transport, memory | 5/5 PASS |
 | `test_midi_io.py` | decoding, mapping, learn capture, virtual-MIDI-port e2e | 5/5 PASS |
 | `test_routing_web.py` | real node server + engine: devices API, routing save/apply, hot-swap simulation | 3/3 PASS |
-| `test_oled.py` | OLED daemon rendering (mock I2C) | 8/8 PASS |
+| `test_oled.py` | OLED daemon rendering (mock I2C) | 11/11 PASS |
 | `test_oled_engine.py` | real daemon + engine over UDP: OLED tracks transport without web UI | 2/2 PASS |
 
 **Total: 7/7 modules PASS.**
@@ -159,3 +159,23 @@ Bulk WAVs → compressed 4-track M4A (ch1-2 VS, ch3 Click, ch4 Dica).
   only) uploaded → "decoded 'full.m4a' → cached WAV (4504 kB)",
   "Cued song ... 4 ch, 12.0 s", CS202 stream, play/seek(+8s)/next
   (click-only song auto-played)/stop all work; cache emptied after unload.
+
+## OLED timestamp stuck at 0:00 (Aug 18)
+
+- Symptom: OLED status line always showed "0:00/0:00" for both position
+  and duration, even while playing; web dashboard times were correct.
+- Root cause: `oled_daemon.render_loop()` copied the shared `_state` into
+  a fresh `DisplayState` for rendering but omitted `position_sec` and
+  `duration_sec` — so the rendered line always used the dataclass
+  defaults (0.0). The daemon was *receiving* correct values (its log
+  showed `0.5/261.5 s`). Purely a render-side bug.
+- Fix: extracted `_copy_state_locked()` (documented "call with
+  `_state_lock` held") that copies the full state incl. position/duration
+  and `sc_playing`; render loop uses it. Engine code untouched.
+- Tests: `test_oled.py` +3 (copy preserves position/duration,
+  `fmt_time` incl. ≥1 h, 7-arg OSC `/oled/update` carries times) —
+  11/11 PASS locally.
+- Live verification (Pi): scp'd `oled_daemon.py` + restart
+  `lanthon-oled` → active, heartbeat ONLINE; mock render check prints
+  `PLAYING  1:54/4:22` for (114.0, 261.5); state.json dur 261.5 now shows
+  on screen while stopped as `STOP 0:00/4:21`.

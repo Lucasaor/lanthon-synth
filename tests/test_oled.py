@@ -22,7 +22,9 @@ os.environ["LANTH0N_OLED_PORT"] = "19876"  # use a non-default port for tests
 # Add parent dir to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from oled_daemon import update_state, _state, _state_lock, init_display, render, start_osc_server, DisplayState
+from oled_daemon import (update_state, _state, _state_lock, init_display,
+                         render, start_osc_server, DisplayState,
+                         _copy_state_locked, fmt_time)
 
 
 class TestDisplayState(unittest.TestCase):
@@ -56,6 +58,22 @@ class TestDisplayState(unittest.TestCase):
         update_state("S", "A", "T", "PLAYING", "Drop C#")
         with _state_lock:
             self.assertTrue(_state.dirty)
+
+    def test_render_copy_preserves_position_and_duration(self):
+        """Regression: the render-loop copy used to drop position/duration,
+        so the status line always showed 0:00/0:00."""
+        update_state("S", "A", "T", "PLAYING", "Drop D", 114.0, 252.0)
+        with _state_lock:
+            snap = _copy_state_locked()
+        self.assertEqual(snap.position_sec, 114.0)
+        self.assertEqual(snap.duration_sec, 252.0)
+
+    def test_fmt_time(self):
+        self.assertEqual(fmt_time(0.0), "0:00")
+        self.assertEqual(fmt_time(114.0), "1:54")
+        self.assertEqual(fmt_time(252.4), "4:12")
+        self.assertEqual(fmt_time(3600.0), "1:00:00")
+        self.assertEqual(fmt_time("garbage"), "0:00")
 
 
 class TestMockDisplay(unittest.TestCase):
@@ -108,6 +126,22 @@ class TestOSCReceiver(unittest.TestCase):
         with _state_lock:
             self.assertEqual(_state.song_name, "Song Z")
             self.assertEqual(_state.tuning, "Drop D")
+
+    def test_osc_update_position_duration(self):
+        """7-arg /oled/update carries position/duration through to state."""
+        try:
+            from pythonosc.udp_client import SimpleUDPClient
+        except ImportError:
+            self.skipTest("python-osc not installed")
+
+        client = SimpleUDPClient("127.0.0.1", 19876)
+        client.send_message("/oled/update",
+                            ["SL", "AR", "SN", "PLAYING", "Drop D", 65.0, 200.0])
+        time.sleep(0.2)
+
+        with _state_lock:
+            self.assertEqual(_state.position_sec, 65.0)
+            self.assertEqual(_state.duration_sec, 200.0)
 
 
 if __name__ == "__main__":

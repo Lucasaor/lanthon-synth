@@ -104,6 +104,27 @@ def update_state(setlist_name: str, artist: str, song_name: str,
              playback_state, artist, song_name, tuning,
              _state.position_sec, _state.duration_sec)
 
+def _copy_state_locked() -> DisplayState:
+    """Return a snapshot copy of the shared display state.
+
+    Caller must hold `_state_lock`. Used by the render loop so rendering
+    sees a consistent state (and so the full state — including
+    position/duration — reaches the display).
+    """
+    global _state
+    return DisplayState(
+        setlist_name   = _state.setlist_name,
+        artist         = _state.artist,
+        song_name      = _state.song_name,
+        playback_state = _state.playback_state,
+        tuning         = _state.tuning,
+        position_sec   = _state.position_sec,
+        duration_sec   = _state.duration_sec,
+        sc_online      = _state.sc_online,
+        sc_playing     = _state.sc_playing,
+    )
+
+
 def handle_heartbeat(online: int, playing: int) -> None:
     """Receive periodic heartbeat from the playback engine to confirm it's alive."""
     global _state, _last_heartbeat
@@ -294,15 +315,9 @@ def render_loop(device) -> None:
                 log.warning("Engine heartbeat lost — marking offline")
 
             if _state.dirty:
-                local_state = DisplayState(
-                    setlist_name   = _state.setlist_name,
-                    artist         = _state.artist,
-                    song_name      = _state.song_name,
-                    playback_state = _state.playback_state,
-                    tuning         = _state.tuning,
-                    sc_online      = _state.sc_online,
-                    sc_playing     = _state.sc_playing,
-                )
+                # Copy EVERYTHING (position/duration included) — a partial
+                # copy here made the status line always render "0:00".
+                local_state = _copy_state_locked()
                 _state.dirty = False
             else:
                 local_state = None
