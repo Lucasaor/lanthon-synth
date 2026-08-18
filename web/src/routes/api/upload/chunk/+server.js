@@ -17,7 +17,7 @@
  * Also: POST /api/upload/cancel  body { name }  — discards a partial upload.
  */
 import { json } from '@sveltejs/kit';
-import { mkdir, writeFile, appendFile, rename, statfs, unlink } from 'fs/promises';
+import { mkdir, writeFile, appendFile, rename, statfs, unlink, stat } from 'fs/promises';
 import path from 'path';
 import { MEDIA_DIR } from '$lib/config.js';
 
@@ -25,6 +25,7 @@ const SPOOL = path.join(MEDIA_DIR, '.uploading');
 const MIN_DISK_MB = 500;
 const MAX_FILE_MB = parseInt(process.env.LANTH0N_MAX_UPLOAD_MB ?? '1024', 10);
 const MAX_CHUNKS = Math.ceil((MAX_FILE_MB * 1024 * 1024) / (64 * 1024)); // sanity cap
+const ALLOWED_EXT = new Set(['.wav', '.flac', '.aiff', '.aif', '.m4a', '.mp4', '.aac', '.mid', '.midi']);
 
 export async function POST({ request }) {
   const name = decodeURIComponent(request.headers.get('x-file-name') ?? '');
@@ -35,13 +36,28 @@ export async function POST({ request }) {
   // are stored verbatim but engine.load_setlist() strips them, so a file
   // named " song.wav" could never be cued. Normalize at the upload edge.
   const safe = path.basename(name).trim();
+  const ext = path.extname(safe).toLowerCase();
   if (!safe || /[\\/]/.test(safe) || safe.startsWith('.') ||
       !Number.isInteger(idx) || !Number.isInteger(total) ||
-      idx < 0 || total < 1 || idx >= total || total > MAX_CHUNKS) {
+      idx < 0 || total < 1 || idx >= total || total > MAX_CHUNKS ||
+      !ALLOWED_EXT.has(ext)) {
     return json({ error: 'invalid chunk request' }, { status: 400 });
   }
 
   const buf = Buffer.from(await request.arrayBuffer());
+
+  // Defense in depth: SvelteKit's node adapter returns an EMPTY body when a
+  // request has no Content-Type (get_raw_body → null), so a client that
+  // omitted it would silently spool 0-byte chunks. If the client declared a
+  // non-zero Content-Length but we received nothing, fail loudly instead of
+  // writing a 0-byte spool file.
+  const declaredLen = Number(request.headers.get('content-length'));
+  if (buf.length === 0 && Number.isFinite(declaredLen) && declaredLen > 0) {
+    return json({
+      error: 'Upload body was not received (request had no Content-Type) — please retry; if it persists, hard-refresh the Files page (Ctrl/Cmd+Shift+R).'
+    }, { status: 400 });
+  }
+
   const partPath = path.join(SPOOL, `${safe}.part`);
   const finalPath = path.join(MEDIA_DIR, safe);
 
@@ -64,6 +80,18 @@ export async function POST({ request }) {
   }
 
   if (idx === total - 1) {
+    // never deliver a 0-byte file: a fully-uploaded file must have content
+    try {
+      const st = await stat(partPath);
+      if (st.size === 0) {
+        await unlink(partPath);
+        return json({
+          error: 'Upload is empty (0 bytes) — check the source file and re-upload'
+        }, { status: 400 });
+      }
+    } catch {
+      return json({ error: 'upload spool missing' }, { status: 500 });
+    }
     await rename(partPath, finalPath);
     return json({ ok: true, done: true, name: safe });
   }

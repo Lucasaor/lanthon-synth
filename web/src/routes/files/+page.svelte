@@ -22,6 +22,11 @@
           'x-file-name': encodeURIComponent(file.name),
           'x-chunk-index': String(i),
           'x-chunk-total': String(total),
+          // Explicit Content-Type is REQUIRED: SvelteKit's node adapter
+          // returns an empty body when a request has no Content-Type. Files
+          // with an unknown MIME type (e.g. some .m4a exports) make the
+          // browser omit it, silently turning every chunk into 0 bytes.
+          'Content-Type': 'application/octet-stream',
         },
         body: blob,
       });
@@ -88,7 +93,7 @@
 </script>
 
 <h1>File Upload</h1>
-<p class="yellow">Upload per-song files: one multichannel WAV (L, R, Click, Cue — optional Timecode) + one companion MIDI automation file per song. Multiple files at once.</p>
+<p class="yellow">Upload per-song files: one multichannel WAV (L, R, Click, Cue — optional Timecode) or compressed M4A/AAC + one companion MIDI automation file per song. Multiple files at once.</p>
 
 {#if uploading}
   <div class="progress-bar">
@@ -105,7 +110,7 @@
   <h2>Song Files (WAV + MID)</h2>
   <p>Name format: <code>Song Name.wav</code> + <code>Song Name.mid</code> (exported from Reaper).</p>
   <div class="upload-row">
-    <input id="mediaInput" type="file" accept=".wav,.flac,.aiff,.aif,.mid,.midi" multiple disabled={uploading} />
+    <input id="mediaInput" type="file" accept=".wav,.flac,.aiff,.aif,.m4a,.mp4,.aac,.mid,.midi" multiple disabled={uploading} />
     <button on:click={() => upload()} disabled={uploading}>
       {uploading ? 'Uploading…' : 'Upload Files'}
     </button>
